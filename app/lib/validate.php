@@ -127,7 +127,7 @@ final class Validate
         $g = Settings::GLOBAL_DEFAULTS;
         $ah = trim((string)($in['admin_host'] ?? ''));
         if ($ah !== '') { $g['admin_host'] = self::host($ah) ?? ''; if ($g['admin_host'] === '') $e['admin_host'] = 'Not a valid host name.'; }
-        $aa = array_values(array_intersect(['lan', 'cert', 'public'], (array)($in['admin_access'] ?? [])));
+        $aa = array_values(array_intersect(['lan', 'cleared', 'cert', 'public'], (array)($in['admin_access'] ?? [])));
         if (!$aa) $e['admin_access'] = 'Choose at least one condition.';
         $g['admin_access'] = $aa ?: ['lan'];
         $em = trim((string)($in['acme_email'] ?? ''));

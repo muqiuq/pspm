@@ -25,6 +25,8 @@ echo "--- PKI"
 php /src/tests/pki-check.php
 echo "--- security"
 php /src/tests/security-check.php
+echo "--- access links (site and admin UI)"
+php /src/tests/access-check.php
 echo "--- export/import"
 php /src/tests/export-check.php export
 PSPM_DB_DSN='pgsql:host=pspm-pg-test;dbname=pspm2' php /src/app/bin/migrate.php /src/db/migrations >/dev/null

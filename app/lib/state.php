@@ -37,9 +37,10 @@ final class State
         };
         switch ($name) {
             case 'cleared':
-                foreach (DB::all('SELECT site_id, host(ip) AS addr, masklen(ip) AS len, expires_at FROM cleared_ips
+                // key "<scope>|<client key>": scope is the site id, or "admin" ($pspm_site of the admin UI)
+                foreach (DB::all('SELECT scope, host(ip) AS addr, masklen(ip) AS len, expires_at FROM cleared_ips
                                   WHERE expires_at IS NULL OR expires_at > now()') as $r) {
-                    $add($r['site_id'] . '|' . IP::clientKey($r['addr']), $r['expires_at'], '1');
+                    $add($r['scope'] . '|' . IP::clientKey($r['addr']), $r['expires_at'], '1');
                 }
                 break;
             case 'banned':

@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 const PSPM_APP = __DIR__ . '/..';
-const PSPM_SCHEMA = 2;   // the newest migration this code needs (db/migrations/NNNN_*.sql)
+const PSPM_SCHEMA = 3;   // the newest migration this code needs (db/migrations/NNNN_*.sql)
 
 // Paths can be moved for tests with environment variables; production uses the defaults.
 define('PSPM_ETC',   rtrim(getenv('PSPM_ETC') ?: '/etc/pspm', '/'));

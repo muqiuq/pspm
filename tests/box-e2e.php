@@ -56,13 +56,28 @@ if ($step === 'setup') {
     if ($errs) throw new RuntimeException(implode('; ', $errs));
     echo "revision $rid committed\n";
 } elseif ($step === 'adminhost') {
-    // the admin host name, e.g. the sign-in host (one server for both); '' = none
+    // the admin host name, e.g. the sign-in host (one server for both); '' = none; optional admin access list
     $g = Settings::global();
     $g['admin_host'] = (string)($argv[2] ?? '');
+    $g['admin_access'] = explode(',', (string)($argv[3] ?? 'lan,cert'));
     Settings::saveGlobal($g);
     [$rid, $errs] = Revisions::commit('admin host name: ' . ($g['admin_host'] ?: 'none'));
     if ($errs) throw new RuntimeException(implode('; ', $errs));
     echo "revision $rid committed\n";
+} elseif ($step === 'adminlink') {
+    // an access link to the admin UI; prints the token
+    [, $token] = Access::createLink(null, 'box-e2e admin', 3600, null, null, '/');
+    echo "$token\n";
+} elseif ($step === 'adminrevoke') {
+    // revoke every link to the admin UI (ends their clearances)
+    $n = 0;
+    foreach (DB::all("SELECT id FROM access_links WHERE target = 'admin' AND revoked_at IS NULL") as $l) { Access::revokeLink($l['id']); $n++; }
+    echo "$n revoked\n";
+} elseif ($step === 'oldclear') {
+    // a clearance as it existed before migration 3 (site link, site_id only)
+    $sid = (string)DB::val("SELECT site_id FROM site_hosts WHERE host = 'cert.pspm.test'");
+    DB::q("INSERT INTO cleared_ips (site_id, ip, expires_at) VALUES (?, '198.51.100.99/32', now() + interval '1 day') ON CONFLICT DO NOTHING", [$sid]);
+    echo "$sid\n";
 } elseif ($step === 'longterm') {
     // 30 days is longer than the kernel's ipset limit (24.8 days): an authorised address
     // (allow-web set) and an escalated firewall block (block set)

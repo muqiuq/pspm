@@ -219,6 +219,8 @@ final class Renderer
                 $o .= "    rewrite_by_lua_file lua/block.lua;\n    access_by_lua_file lua/gate.lua;\n    set \$pspm_listener admin;\n";
                 // also the sign-in host of a provider: its /oauth2/ is public, the UI keeps the admin access
                 if ($shared) $o .= $this->oauth2Location($shared);
+                // access links to the admin UI (plan §11.1): they clear the address for $pspm_site "admin"
+                if (in_array('cleared', $g['admin_access'], true)) $o .= $this->accessLinkLocation();
                 if ($g['hsts']['enabled']) $o .= '    add_header Strict-Transport-Security "max-age=' . $g['hsts']['max_age'] . ($g['hsts']['include_subdomains'] ? '; includeSubDomains' : '') . "\" always;\n";
                 $o .= "    include conf/ui.conf;\n}\n\n";
             }
@@ -545,7 +547,12 @@ final class Renderer
     {
         $uses = in_array('cleared', $s['access']['conditions'], true);
         foreach ($s['routes'] as $r) $uses = $uses || in_array('cleared', $r['overrides']['access']['conditions'] ?? [], true);
-        if (!$uses) return '';
+        return $uses ? $this->accessLinkLocation() : '';
+    }
+
+    /** /.pspm/access/<token>: public and rate-limited; PHP serves only the link handler there (listener "site"). */
+    private function accessLinkLocation(): string
+    {
         return "    location ^~ /.pspm/access/ {\n        set \$pspm_allow public;\n        limit_req zone=pspm_access burst=10 nodelay;\n"
              . $this->fastcgi('site') . "    }\n";
     }

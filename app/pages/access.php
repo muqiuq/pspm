@@ -1,31 +1,41 @@
 <?php
-// Access links (one site each), cleared addresses per site, login bans, blocks (plan §11).
+// Access links (one site each, or the admin UI), cleared addresses, login bans, blocks (plan §11).
 declare(strict_types=1);
 
 $u = Auth::require('viewer');
 $created = null;
+$createdFor = 'site';
+// The admin UI accepts links once "cleared" is in its admin access and an admin host name is set
+// (links are used on that name; by IP the UI answers only to private addresses).
+$g = Settings::global();
+$adminHost = Access::liveAdminHost();
+$adminLinks = $adminHost !== '' && in_array('cleared', $g['admin_access'], true);
 if (is_post()) {
     Auth::require('operator');
     $a = post('action');
     if ($a === 'create_link') {
-        $site = Model::site((string)post('site'));
+        $forAdmin = post('site') === 'admin';
+        $site = $forAdmin ? null : Model::site((string)post('site'));
         $grant = post('grant') === 'permanent' ? null : Validate::int(post('grant'), 3600, 90 * 86400);
         $until = trim((string)post('valid_until')) !== '' ? (strtotime((string)post('valid_until') . ' 23:59:59') ?: null) : null;
         $max = trim((string)post('max_uses')) !== '' ? Validate::int(post('max_uses'), 1, 100000) : null;
         $after = trim((string)post('after', '/')) ?: '/';
-        if (!$site || !in_array('cleared', $site['access']['conditions'], true)) flash('Choose a site whose policy accepts cleared addresses.', 'danger');
+        if ($forAdmin && !Auth::can('admin')) flash('Only admins create links to the admin UI.', 'danger');
+        elseif ($forAdmin && !$adminLinks) flash('The admin UI does not accept access links: set an admin host name and tick "Access links" under Settings → Admin access, then apply.', 'danger');
+        elseif (!$forAdmin && (!$site || !in_array('cleared', $site['access']['conditions'], true))) flash('Choose a site whose policy accepts cleared addresses.', 'danger');
         elseif (post('grant') !== 'permanent' && $grant === null) flash('Choose how long a visit clears the address.', 'danger');
         elseif ($after !== '/' && !Validate::path($after)) flash('The path after the grant must start with / (no spaces, quotes, $).', 'danger');
         elseif (trim((string)post('label')) === '') flash('Give the link a label: who it is for.', 'danger');
         else {
-            [$lid, $token] = Access::createLink($site['id'], mb_substr(trim((string)post('label')), 0, 100), $grant, $until ? gmdate('c', $until) : null, $max, $after);
-            $created = 'https://' . $site['hosts'][0] . '/.pspm/access/' . $token;
+            [$lid, $token] = Access::createLink($site['id'] ?? null, mb_substr(trim((string)post('label')), 0, 100), $grant, $until ? gmdate('c', $until) : null, $max, $after);
+            $created = 'https://' . ($forAdmin ? $adminHost : $site['hosts'][0]) . '/.pspm/access/' . $token;
+            $createdFor = $forAdmin ? 'admin' : 'site';
         }
     } elseif ($a === 'revoke_link' && ($id = Validate::uuid(post('id')))) {
         Access::revokeLink($id);
         flash('Link revoked; the addresses it cleared are no longer cleared.');
-    } elseif ($a === 'remove_cleared' && ($sid = Validate::uuid(post('site'))) && ($ip = IP::normCidr((string)post('ip')))) {
-        DB::q('DELETE FROM cleared_ips WHERE site_id = ? AND ip = ?::cidr', [$sid, $ip]);
+    } elseif ($a === 'remove_cleared' && ($sid = (post('site') === 'admin' ? 'admin' : Validate::uuid(post('site')))) && ($ip = IP::normCidr((string)post('ip')))) {
+        DB::q('DELETE FROM cleared_ips WHERE scope = ? AND ip = ?::cidr', [$sid, $ip]);
         Audit::log('cleared.remove', "ip:$ip", ['site' => $sid]);
         State::publish('cleared');
         flash("$ip is no longer cleared for that site.");
@@ -65,9 +75,11 @@ if (is_post()) {
 
 $sites = Model::sites();
 $linkSites = array_filter($sites, fn($s) => in_array('cleared', $s['access']['conditions'], true));
-$links = DB::all('SELECT l.*, s.name AS site FROM access_links l JOIN sites s ON s.id = l.site_id ORDER BY s.name, l.created_at DESC');
-$cleared = DB::all('SELECT c.*, s.name AS site, l.label FROM cleared_ips c JOIN sites s ON s.id = c.site_id LEFT JOIN access_links l ON l.id = c.link_id
-                    WHERE c.expires_at IS NULL OR c.expires_at > now() ORDER BY s.name, c.created_at DESC');
+$adminLabel = 'PSPM admin UI';
+$links = DB::all("SELECT l.*, coalesce(s.name, ?) AS site FROM access_links l LEFT JOIN sites s ON s.id = l.site_id
+                  ORDER BY l.target, s.name, l.created_at DESC", [$adminLabel]);
+$cleared = DB::all("SELECT c.*, coalesce(s.name, ?) AS site, l.label FROM cleared_ips c LEFT JOIN sites s ON s.id = c.site_id LEFT JOIN access_links l ON l.id = c.link_id
+                    WHERE c.expires_at IS NULL OR c.expires_at > now() ORDER BY c.scope = 'admin' DESC, s.name, c.created_at DESC", [$adminLabel]);
 $bans = DB::all('SELECT * FROM banned_ips WHERE expires_at > now() ORDER BY created_at DESC');
 $blocks = DB::all('SELECT * FROM blocks WHERE expires_at > now() ORDER BY created_at DESC LIMIT 200');
 $canEdit = Auth::can('operator');
@@ -77,7 +89,9 @@ page_start('Access', '/access');
 <?php if ($created): ?>
   <div class="alert alert-success">The link, shown once — send it to the person it is for:
     <div class="input-group mt-2"><input class="form-control font-monospace" readonly value="<?= h($created) ?>" id="newlink"><button class="btn btn-outline-secondary" type="button" data-copy="#newlink">Copy</button></div>
-    <div class="small mt-1">It opens only this site, and only once the site is applied with <code>cleared</code> in its policy.</div></div>
+    <div class="small mt-1"><?= $createdFor === 'admin'
+        ? 'It opens the admin UI\'s sign-in page for the address it is used from; signing in still needs a PSPM account. It works only on the admin host name.'
+        : 'It opens only this site, and only once the site is applied with <code>cleared</code> in its policy.' ?></div></div>
 <?php endif; ?>
 <div class="row g-4">
 <div class="col-xl-7">
@@ -91,11 +105,14 @@ page_start('Access', '/access');
       <td><?= !$l['revoked_at'] && $canEdit ? post_button('/access', 'Revoke', ['action' => 'revoke_link', 'id' => $l['id']], 'btn-outline-danger btn-sm', 'Revoke this link and end its clearances?') : '' ?></td></tr>
   <?php endforeach; ?></tbody></table>
   <?php if ($canEdit): ?>
-    <?php if (!$linkSites): ?><p class="small text-muted">No site accepts cleared addresses yet. Add <em>Cleared</em> to a site's access policy first.</p>
+    <?php $canAdminLink = $adminLinks && Auth::can('admin'); ?>
+    <?php if (!$adminLinks && Auth::can('admin')): ?><p class="small text-muted">Links to the admin UI: set an admin host name and tick <em>Access links</em> under Settings → Admin access, then apply.</p><?php endif; ?>
+    <?php if (!$linkSites && !$canAdminLink): ?><p class="small text-muted">No site accepts cleared addresses yet. Add <em>Cleared</em> to a site's access policy first.</p>
     <?php else: ?>
     <form method="post" class="card card-body mb-3"><?= csrf_field() ?><input type="hidden" name="action" value="create_link">
       <div class="row g-2">
-        <div class="col-md-4"><label class="form-label small">Site</label><select class="form-select form-select-sm" name="site"><?php foreach ($linkSites as $s): ?><option value="<?= h($s['id']) ?>"><?= h($s['hosts'][0]) ?></option><?php endforeach; ?></select></div>
+        <div class="col-md-4"><label class="form-label small">Opens</label><select class="form-select form-select-sm" name="site"><?php foreach ($linkSites as $s): ?><option value="<?= h($s['id']) ?>"><?= h($s['hosts'][0]) ?></option><?php endforeach; ?>
+          <?php if ($canAdminLink): ?><option value="admin"><?= h($adminLabel . ' (' . $adminHost . ')') ?></option><?php endif; ?></select></div>
         <div class="col-md-4"><label class="form-label small">For (label)</label><input class="form-control form-control-sm" name="label" placeholder="Anna, laptop"></div>
         <div class="col-md-4"><label class="form-label small">A visit clears the address for</label><select class="form-select form-select-sm" name="grant">
           <?php foreach ([3600 => '1 hour', 28800 => '8 hours', 86400 => '1 day', 604800 => '7 days', 2592000 => '30 days', 7776000 => '90 days', 'permanent' => 'permanent'] as $k => $v): ?><option value="<?= h($k) ?>" <?= $k === 604800 ? 'selected' : '' ?>><?= h($v) ?></option><?php endforeach; ?></select></div>
@@ -112,7 +129,7 @@ page_start('Access', '/access');
   <table class="table table-sm small"><thead><tr><th>Site</th><th>Address</th><th>Through</th><th>Until</th><th></th></tr></thead><tbody>
   <?php foreach ($cleared as $c): ?><tr><td><?= h($c['site']) ?></td><td><code><?= h($c['ip']) ?></code></td><td><?= h($c['label'] ?? 'manual') ?></td>
     <td><?= $c['expires_at'] ? h(fmt_time($c['expires_at'])) : 'permanent' ?></td>
-    <td><?= $canEdit ? post_button('/access', 'Remove', ['action' => 'remove_cleared', 'site' => $c['site_id'], 'ip' => $c['ip']], 'btn-link btn-sm p-0') : '' ?></td></tr><?php endforeach; ?>
+    <td><?= $canEdit ? post_button('/access', 'Remove', ['action' => 'remove_cleared', 'site' => $c['scope'], 'ip' => $c['ip']], 'btn-link btn-sm p-0') : '' ?></td></tr><?php endforeach; ?>
   </tbody></table>
   <?= $canEdit ? post_button('/access', 'Purge expired entries', ['action' => 'purge']) : '' ?>
 </div>

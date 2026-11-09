@@ -34,15 +34,23 @@ final class Access
 
     // ---- access links (one site each, plan §11.1)
 
-    public static function createLink(string $siteId, string $label, ?int $grantSecs, ?string $validUntil, ?int $maxUses, string $after): array
+    /** A link for one site, or for the admin UI ($siteId null). Returns [id, token]; the token is shown once. */
+    public static function createLink(?string $siteId, string $label, ?int $grantSecs, ?string $validUntil, ?int $maxUses, string $after): array
     {
         $token = Crypto::token(24);
         $id = Crypto::uuid();
-        DB::q('INSERT INTO access_links (id, token_hash, site_id, label, grant_secs, valid_until, max_uses, after_path, created_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [$id, hash('sha256', $token), $siteId, $label, $grantSecs, $validUntil, $maxUses, $after, Audit::actor()]);
-        Audit::log('link.create', "link:$id", ['site' => $siteId, 'label' => $label]);
+        DB::q('INSERT INTO access_links (id, token_hash, site_id, target, label, grant_secs, valid_until, max_uses, after_path, created_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [$id, hash('sha256', $token), $siteId, $siteId === null ? 'admin' : 'site', $label, $grantSecs, $validUntil, $maxUses, $after, Audit::actor()]);
+        Audit::log('link.create', "link:$id", ['site' => $siteId ?? 'admin UI', 'label' => $label]);
         return [$id, $token];
+    }
+
+    /** The admin host name that is live (the applied revision), else the working copy's. */
+    public static function liveAdminHost(): string
+    {
+        $live = Live::revision()['document']['global']['admin_host'] ?? null;
+        return (string)($live ?? Settings::global()['admin_host']);
     }
 
     public static function revokeLink(string $id): void
@@ -56,13 +64,21 @@ final class Access
     }
 
     /**
-     * A visit to https://<site host>/.pspm/access/<token>. Returns [ok, message, redirect path].
+     * A visit to https://<site host>/.pspm/access/<token>, or to the admin host name for a link
+     * to the admin UI. A link works only on its own host names. Returns [ok, message, redirect path].
      */
     public static function useLink(string $host, string $token, string $ip): array
     {
         if (self::isBanned($ip)) return [false, 'Your address is blocked.', null];
-        $l = DB::one('SELECT l.*, h.host FROM access_links l JOIN site_hosts h ON h.site_id = l.site_id
-                      WHERE l.token_hash = ? AND h.host = ?', [hash('sha256', $token), strtolower($host)]);
+        $host = strtolower($host);
+        $l = DB::one('SELECT * FROM access_links WHERE token_hash = ?', [hash('sha256', $token)]);
+        if ($l) {
+            $hostOk = $l['target'] === 'admin'
+                ? $host !== '' && $host === self::liveAdminHost()
+                : (bool)DB::val('SELECT 1 FROM site_hosts WHERE site_id = ? AND host = ?', [$l['site_id'], $host]);
+            if (!$hostOk) $l = null;
+            else $l['host'] = $host;
+        }
         if (!$l || $l['revoked_at'] || ($l['valid_until'] && strtotime($l['valid_until']) < time())
             || ($l['max_uses'] !== null && (int)$l['uses'] >= (int)$l['max_uses'])) {
             return [false, 'This link is not valid (any more).', null];
@@ -73,7 +89,7 @@ final class Access
             DB::q('UPDATE access_links SET uses = uses + 1, last_used_at = now() WHERE id = ?', [$l['id']]);
             DB::q('INSERT INTO cleared_ips (site_id, ip, link_id, expires_at)
                    VALUES (?, ?::cidr, ?, CASE WHEN ?::int IS NULL THEN NULL ELSE now() + make_interval(secs => ?::int) END)
-                   ON CONFLICT (site_id, ip) DO UPDATE SET link_id = excluded.link_id, expires_at = excluded.expires_at',
+                   ON CONFLICT (scope, ip) DO UPDATE SET link_id = excluded.link_id, expires_at = excluded.expires_at',
                 [$l['site_id'], $cidr, $l['id'], $l['grant_secs'], $l['grant_secs']]);
             if (!IP::isPrivate(explode('/', $cidr)[0])) {
                 DB::q("INSERT INTO trusted_ips (ip, kind, source, last_seen, expires_at)

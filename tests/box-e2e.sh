@@ -80,13 +80,26 @@ lanip=$(ip -o -4 addr show scope global | awk '$2 !~ /^(docker|br-|veth)/ {sub(/
 pp adminhost auth.pspm.test >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-admin.out 2>&1; rc=$?
 grep -q "Rolling back" /var/log/pspm/install-latest.log && bad "admin host = sign-in host: rolled back ($(grep -m1 'Rolling back' /var/log/pspm/install-latest.log))" \
     || { [[ $rc == 0 || $rc == 2 ]] && ok "admin host = sign-in host applies (exit $rc), TLS check uses the certificate in use" || bad "admin host apply exit $rc"; }
-c=$(curl -sk -o /dev/null -w '%{http_code}' --resolve "auth.pspm.test:443:$lanip" https://auth.pspm.test/login)
-[[ $c == 200 ]] && ok "shared host: the UI answers from the LAN ($lanip): $c" || bad "shared host UI from LAN: $c"
-c=$(curl -sk -o /dev/null -w '%{http_code}' --resolve auth.pspm.test:443:127.0.0.1 https://auth.pspm.test/login)
-[[ $c == 403 ]] && ok "shared host: the UI refuses a non-LAN address: $c" || bad "shared host UI from 127.0.0.1: $c"
+# UI probes use / (303 to the login page once the gate lets in, 403 otherwise): /login is limited to 10/min
+ui() { curl -sk -o /dev/null -w '%{http_code}' --resolve "auth.pspm.test:443:$1" https://auth.pspm.test/; }
+c=$(ui "$lanip"); [[ $c == 303 ]] && ok "shared host: the UI answers from the LAN ($lanip): $c" || bad "shared host UI from LAN: $c"
+c=$(ui 127.0.0.1); [[ $c == 403 ]] && ok "shared host: the UI refuses a non-LAN address: $c" || bad "shared host UI from 127.0.0.1: $c"
 loc=$(curl -sk -o /dev/null -w '%{http_code} %{redirect_url}' --resolve auth.pspm.test:443:127.0.0.1 'https://auth.pspm.test/oauth2/start?rd=https%3A%2F%2Fsso.pspm.test%2F')
 [[ $loc == "302 https://login.microsoftonline.com/"* ]] && ok "shared host: /oauth2/ is public and hands over to Microsoft" || bad "shared host /oauth2/: $loc"
 c=$(cb 127.0.0.1); [[ $c == 500 ]] && ok "shared host: the callback gets the CSRF cookie (fake code refused by Microsoft: $c)" || bad "shared host callback: $c (403 = CSRF cookie lost)"
+# access links for the admin UI: a non-LAN address gets the UI only after using the link
+pp adminrevoke >/dev/null   # a clean start when the test runs again
+pp adminhost auth.pspm.test lan,cleared,cert >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-adminlink.out 2>&1
+grep -q "OPENS: admin UI reachable by: lan, cleared, cert" /root/apply-adminlink.out && ok "review: admin UI reachable by access links (OPENS)" || bad "review line for admin links missing"
+c=$(ui 127.0.0.1); [[ $c == 403 ]] && ok "admin UI before the link, non-LAN address: $c" || bad "admin UI before the link: $c"
+tok=$(pp adminlink)
+loc=$(curl -sk -o /dev/null -w '%{http_code} %{redirect_url}' --resolve auth.pspm.test:443:127.0.0.1 "https://auth.pspm.test/.pspm/access/$tok")
+[[ $loc == "303 https://auth.pspm.test/" ]] && ok "the admin link clears the address and opens the UI" || bad "admin link: $loc"
+c=$(ui 127.0.0.1); [[ $c == 303 ]] && ok "admin UI after the link, same address: $c (to its sign-in page)" || bad "admin UI after the link: $c"
+c=$(curl -sk -o /dev/null -w '%{http_code}' --resolve cert.pspm.test:443:127.0.0.1 "https://cert.pspm.test/.pspm/access/$tok")
+[[ $c != 303 ]] && ok "the admin link does not work on a site host: $c" || bad "admin link on a site host: $c"
+pp adminrevoke >/dev/null
+c=$(ui 127.0.0.1); [[ $c == 403 ]] && ok "revoked: the admin UI refuses that address again: $c" || bad "admin UI after revoking the link: $c"
 # a release in which two servers answer one name is refused (nginx -t only warns)
 dupdir=/tmp/dup-release; rm -rf "$dupdir"; cp -a "$(readlink -f /etc/pspm/nginx/current)" "$dupdir"
 printf 'server {\n    listen 80;\n    server_name cert.pspm.test;\n    return 404;\n}\n' >> "$dupdir/conf/signin.conf"

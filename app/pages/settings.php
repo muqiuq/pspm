@@ -85,6 +85,7 @@ page_start('Settings', '/settings');
     <?= f_text('admin_host', 'Admin host name', $g['admin_host'], $errors, 'Empty: the UI answers by IP, to private addresses only. Once set and its certificate exists, the UI answers only there (and through the SSH tunnel). It may be the sign-in host of a Microsoft provider; that host\'s /oauth2/ stays public.') ?>
     <div class="mb-3"><span class="form-label d-block">Who may open the UI on the host name (then password + code)</span>
       <?= f_check('admin_access[]', 'LAN', in_array('lan', $g['admin_access'], true), '', 'lan') ?>
+      <?= f_check('admin_access[]', 'Access links for the admin UI (Access page; needs the admin host name)', in_array('cleared', $g['admin_access'], true), '', 'cleared') ?>
       <?= f_check('admin_access[]', 'Client certificate', in_array('cert', $g['admin_access'], true), '', 'cert') ?>
       <?= f_check('admin_access[]', 'Everyone (password and code only)', in_array('public', $g['admin_access'], true), '', 'public') ?>
       <?= field_err($errors, 'admin_access') ?></div>

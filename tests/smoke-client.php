@@ -1,6 +1,7 @@
 <?php
 // Drives the UI like a browser: sign-in, password change, TOTP enrolment, then a site.
 declare(strict_types=1);
+$serverEtc = getenv('PSPM_ETC') ?: '/tmp/etc';   // the server's, for the one step that changes settings directly
 putenv('PSPM_ETC=/nonexistent');
 require '/src/app/lib/totp.php';
 require '/src/app/lib/util.php';
@@ -94,6 +95,16 @@ check($c === 200 && str_contains($b, 'Create link'), 'access offers links for th
 [$c, $b] = req('POST', '/access', ['_csrf' => csrf($b), 'action' => 'block', 'ip' => '10.0.0.0/8', 'days' => '1', 'reason' => 'x']);
 [$c, $b] = req('GET', '/access');
 check(!str_contains($b, '10.0.0.0/8'), 'private ranges cannot be blocked');
+// links to the admin UI (the logic: tests/access-check.php; here the page)
+check(str_contains($b, 'Links to the admin UI: set an admin host name'), 'access explains how to enable links to the admin UI');
+exec('PSPM_ETC=' . escapeshellarg($serverEtc) . ' php -r ' . escapeshellarg('require "/src/app/lib/bootstrap.php"; $g = Settings::global(); $g["admin_host"] = "proxy.pspm.test"; $g["admin_access"] = ["lan", "cleared", "cert"]; Settings::saveGlobal($g);'), $out, $rc);
+check($rc === 0, 'admin host name and "access links" set for the admin UI');
+[$c, $b] = req('GET', '/access');
+check(str_contains($b, '<option value="admin">PSPM admin UI (proxy.pspm.test)</option>'), 'access offers links to the admin UI');
+[$c, $b] = req('POST', '/access', ['_csrf' => csrf($b), 'action' => 'create_link', 'site' => 'admin', 'label' => 'smoke admin', 'grant' => '3600', 'after' => '/']);
+check($c === 200 && preg_match('#value="https://proxy\.pspm\.test/\.pspm/access/[A-Za-z0-9_-]{20,}"#', $b) === 1 && str_contains($b, 'opens the admin UI'),
+    'a link to the admin UI is created and shown once');
+check(str_contains($b, '<td>PSPM admin UI</td><td>smoke admin</td>'), 'the link list names the admin UI');
 [$c, , $loc] = req('POST', '/logout', ['_csrf' => csrf($b)]);
 check($c === 303, 'sign-out');
 [$c] = req('GET', '/');

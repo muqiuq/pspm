@@ -148,7 +148,7 @@ final class SecScan
             if (!empty($d['user'])) $actors[] = ['user', strtolower((string)$d['user'])];
             if ($out === 'cleared' && $site !== '') {
                 $ck = "$site|$key";
-                $clearedLinks[$ck] ??= (string)(DB::val('SELECT link_id FROM cleared_ips WHERE site_id = ? AND ip = ?::cidr', [$site, $key]) ?? '');
+                $clearedLinks[$ck] ??= (string)(DB::val('SELECT link_id FROM cleared_ips WHERE scope = ? AND ip = ?::cidr', [$site, $key]) ?? '');
                 if ($clearedLinks[$ck] !== '') $actors[] = ['link', $clearedLinks[$ck]];
             }
             foreach ($actors as [$type, $actor]) {

@@ -17,7 +17,7 @@ final class Export
         'backends'   => ['backends' => ['backends', 'id', []]],
         'sites'      => ['sites' => ['sites', 'id', []], 'hosts' => ['site_hosts', 'host', []]],
         'revisions'  => ['revisions' => ['config_revisions', 'id', []], 'applies' => ['applies', 'id', []]],
-        'access'     => ['links' => ['access_links', 'id', ['token_hash' => 'raw']], 'cleared' => ['cleared_ips', 'site_id, ip', []], 'bans' => ['banned_ips', 'ip', []]],
+        'access'     => ['links' => ['access_links', 'id', ['token_hash' => 'raw']], 'cleared' => ['cleared_ips', 'scope, ip', []], 'bans' => ['banned_ips', 'ip', []]],
         'signin'     => ['providers' => ['oauth_providers', 'id', ['client_secret_enc' => 'seal', 'cookie_secret_enc' => 'seal']]],
         'pki'        => ['cas' => ['cas', 'id', ['key_wrapped' => 'raw']], 'client_certs' => ['client_certs', 'id', []]],
         'security'   => ['trusted' => ['trusted_ips', 'ip', []], 'blocks' => ['blocks', 'ip', []], 'block_history' => ['block_history', 'id', []],
@@ -38,12 +38,19 @@ final class Export
     private static function rows(string $table, string $pk): array
     {
         $js = self::jsonbColumns($table);
+        $gen = array_flip(self::generatedColumns($table));
         $out = [];
         foreach (DB::all("SELECT * FROM $table ORDER BY $pk") as $r) {
             foreach ($js as $c) if (isset($r[$c])) $r[$c] = json_dec($r[$c]);
-            $out[] = $r;
+            $out[] = array_diff_key($r, $gen);   // derived by the database (e.g. cleared_ips.scope)
         }
         return $out;
+    }
+
+    /** Columns the database computes itself; they are neither exported nor inserted. */
+    private static function generatedColumns(string $table): array
+    {
+        return array_column(DB::all("SELECT column_name FROM information_schema.columns WHERE table_name = ? AND is_generated = 'ALWAYS'", [$table]), 'column_name');
     }
 
     /** @param array|null $tls ['letsencrypt' => base64 tar.gz, 'never_block' => text] (CLI only) */
@@ -170,6 +177,7 @@ final class Export
             }
             foreach ($all as [$section, $label, $table, $pk, $secretCols]) {
                 $js = self::jsonbColumns($table);
+                $gen = self::generatedColumns($table);
                 $n = 0;
                 foreach ($doc[$section][$label] ?? [] as $r) {
                     if ($table === 'users' && $r['username'] === $importer) continue;
@@ -186,6 +194,7 @@ final class Export
                     // keep ids (round trip); only a user whose id is the importer's gets a new one
                     if ($table === 'users' && (string)$r['id'] === (string)DB::val('SELECT id FROM users WHERE username = ?', [$importer])) unset($r['id']);
                     foreach ($js as $c) if (array_key_exists($c, $r)) $r[$c] = $r[$c] === null ? null : json_enc($r[$c]);
+                    foreach ($gen as $c) unset($r[$c]);   // older files never had them; newer ones leave them out
                     $cols = array_keys($r);
                     DB::q("INSERT INTO $table (" . implode(', ', $cols) . ') VALUES (' . implode(', ', array_map(fn($c) => ":$c", $cols)) . ')', $r);
                     $n++;

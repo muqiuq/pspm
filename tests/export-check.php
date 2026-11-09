@@ -28,6 +28,8 @@ if ($mode === 'export') {
     $u = DB::one("SELECT * FROM users WHERE username = 'tester' OR username = 'admin' LIMIT 1");
     check($u && str_starts_with($u['password_hash'], '$argon2id$'), 'password hashes restored');
     check(!$u['totp_secret_enc'] || strlen(Crypto::open($u['totp_secret_enc'])) === 32, 'TOTP secret re-sealed with this box key');
+    check(DB::val("SELECT scope FROM cleared_ips WHERE ip = '203.0.113.51/32'") === 'admin' && DB::val("SELECT target FROM access_links WHERE label = 'export round trip'") === 'admin',
+        'an admin link and its clearance survive the round trip (scope is recomputed by the database)');
     check(PKI::unwrap(DB::val('SELECT key_wrapped FROM cas LIMIT 1'), 'correct horse battery staple', DB::val('SELECT id FROM cas LIMIT 1'), DB::val('SELECT fingerprint_sha256 FROM cas LIMIT 1')) !== null,
         'the CA key still unwraps with its passphrase');
     file_put_contents('/tmp/export2.json', Export::encode(Export::build($pass, true, ['letsencrypt' => base64_encode('fake-tar'), 'never_block' => "203.0.113.9\n"])));

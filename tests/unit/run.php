@@ -172,6 +172,17 @@ eq($rs['summary']['admin']['signin'], $doc['providers'][0]['id'], 'shared host: 
 $two = $doc; $p2 = $doc['providers'][0]; $p2['id'] = 'ffffffff-ffff-4fff-8fff-ffffffffffff'; $p2['name'] = 'Second'; $p2['port'] = 4182; $two['providers'][] = $p2;
 ok((bool)array_filter(Model::checkDocument($two), fn($e) => str_contains($e, 'used by two providers')), 'two providers with one sign-in host are refused');
 
+// Access links for the admin UI: the admin server serves /.pspm/access/ only when "cleared" is in its admin access
+$adminSrv = fn(array $files) => (string)(array_values(array_filter(explode("\nserver {\n", $files['conf/system.conf']),
+    fn($b) => str_contains($b, 'listen 443 ssl;') && str_contains($b, '$pspm_site "admin"')))[0] ?? '');
+ok(!str_contains($adminSrv($r['files']), '/.pspm/access/'), 'admin access without links: no link location on the admin server');
+$al = $doc; $al['global']['admin_access'] = ['lan', 'cleared', 'cert'];
+eq(Validate::global($al['global'])[1], [], 'admin access "cleared" (access links) is accepted');
+$ra = (new Renderer(['id' => 4, 'document' => $al], $facts))->render();
+ok((bool)preg_match('#location \^~ /\.pspm/access/ \{\n        set \$pspm_allow public;\n        limit_req zone=pspm_access.*?fastcgi_param PSPM_LISTENER site;#s', $adminSrv($ra['files'])),
+    'admin access with links: the admin server serves /.pspm/access/ (public, rate-limited, link handler only)');
+ok(str_contains($adminSrv($ra['files']), 'set $pspm_allow lan,cleared,cert;'), 'the admin server accepts cleared addresses');
+
 // Changes page: an unchanged working copy previews without differences, also on a box
 // without IPv6 (the preview uses the facts the live release was rendered with)
 $etc = sys_get_temp_dir() . '/pspm-preview-' . getmypid();
