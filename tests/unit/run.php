@@ -67,6 +67,9 @@ $all = implode("\n", $r['files']);
 ok(!str_contains($all, '$$'), 'no doubled dollars');
 foreach ($r['files'] as $p => $content) {
     if (!str_starts_with($p, 'sites/')) continue;
+    foreach (array_slice(explode("\nserver {\n", "\n$content"), 1) as $i => $srv) {
+        eq(substr_count($srv, "\n    set \$pspm_signin "), 1, "$p server " . ($i + 1) . ': $pspm_signin set once at server level');
+    }
     // every proxying location sets every identity header (plan §12.4)
     preg_match_all('/location [^{]+\{(.*?)\n    \}/s', $content, $m);
     // every proxying location sets every identity header: to the signed-in identity or to empty (plan §12.4)
@@ -126,6 +129,31 @@ if (is_array($ag)) {
     eq($ag['culprit'], ' [entry: 203.0.113.7/32 timeout 2147483]', 'restore error names the entry of its line');
     eq($ag['nolines'], '', 'errors without a line name no entry');
 }
+
+// Review (install.sh): sign-in is part of what a site is reachable by
+$review = function (?array $old, array $new): string {
+    $dir = sys_get_temp_dir();
+    $fo = $old === null ? '/dev/null' : tempnam($dir, 'rv'); $fn = tempnam($dir, 'rv');
+    if ($old !== null) file_put_contents($fo, json_enc(['document' => $old]));
+    file_put_contents($fn, json_enc(['document' => $new]));
+    $p = proc_open([PHP_BINARY, __DIR__ . '/../../app/bin/review.php', $fo, $fn], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    $out = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]); proc_close($p);
+    if ($old !== null) unlink($fo);
+    unlink($fn);
+    return (string)$out;
+};
+$rv = $review(null, $doc);
+ok(str_contains($rv, 'OPENS: new site app.example.ch, reachable by: lan, cleared, cert, or Microsoft sign-in (Example staff: groups aaaa1111-2222-3333-4444-555566667777)'), 'new site: sign-in alternative in its OPENS line' . (str_contains($rv, 'OPENS') ? '' : ": $rv"));
+ok(!str_contains($rv, '/device/'), 'a route without sign-in on an "alternative" site does not open anything');
+$noSi = $doc; $noSi['sites'][0]['access']['signin']['mode'] = 'none';
+ok(str_contains($review($noSi, $doc), 'OPENS: site app.example.ch: Microsoft sign-in added as an alternative (Example staff: groups aaaa1111-2222-3333-4444-555566667777)'), 'sign-in added as an alternative opens');
+$req = $doc; $req['sites'][0]['access']['signin']['mode'] = 'required';
+ok(str_contains($review($req, $doc), 'sign-in is now an alternative instead of required'), 'required → alternative opens');
+ok(!str_contains($review($doc, $req), 'OPENS'), 'alternative → required opens nothing');
+ok(str_contains($review($req, $req), 'No configuration changes'), 'no change, no lines');
+$any = $doc; $any['sites'][0]['access']['signin']['groups'] = [];
+ok(str_contains($review($doc, $any), 'more users may sign in (groups: no limit)'), 'dropping the group limit opens');
+ok(str_contains($review(null, $any), 'or Microsoft sign-in (Example staff: any account from example.ch)'), 'without limits: every account the provider accepts');
 
 // Firewall problem summary (dashboard, health mail)
 eq(Status::firewallProblem(['sets' => ['pspm-block4' => 3], 'errors' => [], 'rules' => ['chain4' => 'ok']]), null, 'no firewall problem');

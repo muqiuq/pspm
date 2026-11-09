@@ -183,7 +183,7 @@ log_system_header() {
     log_raw "memory:    $(free -m 2>/dev/null | awk '/^Mem:/ {print $2 " MB total, " $7 " MB available"}')"
     log_raw "addresses: $(ip -o addr show scope global 2>/dev/null | awk '{print $4}' | tr '\n' ' ')"
     local pkgs="nginx libnginx-mod-http-lua php8.4-fpm docker.io docker-compose certbot ipset iptables"
-    log_raw "packages:  $(dpkg-query -W -f='${Package}=${Version} ' $pkgs 2>/dev/null)"
+    log_raw "packages:  $(dpkg-query -W -f='${Package}=${Version} ' $pkgs 2>/dev/null || true)"   # exit 1 while some are not installed yet
     log_raw "nginx:     $(tr '\0' ' ' 2>/dev/null </proc/"$(cat /run/nginx.pid 2>/dev/null || echo 0)"/cmdline || echo 'not running')"
     log_raw "release:   $(readlink /etc/pspm/nginx/current 2>/dev/null || echo none)"
     log_raw "journal:   $(tr '\n' ' ' 2>/dev/null </var/lib/pspm/apply.journal || echo none)"

@@ -276,7 +276,8 @@ final class Renderer
             if (!$cert) $st['pending'] = true;
             else $st['cert'] = $cert['name'];
         }
-        $siteVars = $this->vars($s['id'], implode(',', $s['access']['conditions']), $s['access']['denied'], $s['access']['denied_url'])
+        // signinVars sets $pspm_signin itself when the site or a route signs in
+        $siteVars = $this->vars($s['id'], implode(',', $s['access']['conditions']), $s['access']['denied'], $s['access']['denied_url'], !$this->signinProvider($s))
             . $this->signinVars($s);
         $o = "# Site $host (" . $s['id'] . ")\n";
 
@@ -513,13 +514,13 @@ final class Renderer
         return $o . "    location ^~ /.pspm/error/ {\n        internal;\n        set \$pspm_allow public;\n        alias static/errors/;\n    }\n";
     }
 
-    private function vars(string $site, string $allow, string $deny, string $denyUrl = ''): string
+    private function vars(string $site, string $allow, string $deny, string $denyUrl = '', bool $signinNone = true): string
     {
         // $pspm_outcome and the identity variables are not set here: a server-level "set"
         // runs again on internal redirects (error pages) and would wipe what Lua recorded.
         // They are declared once in conf/system.conf.
         return "    set \$pspm_site \"$site\";\n    set \$pspm_allow $allow;\n    set \$pspm_deny $deny;\n"
-             . "    set \$pspm_deny_url \"$denyUrl\";\n    set \$pspm_listener \"\";\n    set \$pspm_signin none;\n";
+             . "    set \$pspm_deny_url \"$denyUrl\";\n    set \$pspm_listener \"\";\n" . ($signinNone ? "    set \$pspm_signin none;\n" : '');
     }
 
     // ---------------------------------------------------------------- upstreams and certificates

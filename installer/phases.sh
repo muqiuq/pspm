@@ -547,11 +547,13 @@ phase_certificates() {
         fi
     done
     letsencrypt_acls
+    local live=""
     if (( issued > 0 )); then
         info "New certificates: applying again so nginx uses them…"
         CERT_REAPPLY=1 ASSUME_YES=1 apply_configuration "${APPLY_REVISION:-}" || { phase_end fail "re-apply failed"; return 1; }
+        live="; ${APPLY_RESULT:-applied again}"   # the summary row of phase 12 names the release before this one
     fi
-    phase_end "$([[ $failed == 0 ]] && echo ok || echo warn)" "$issued issued, $failed failed"
+    phase_end "$([[ $failed == 0 ]] && echo ok || echo warn)" "$issued issued, $failed failed$live"
 }
 
 # ---------------------------------------------------------------- 14 report

@@ -240,9 +240,12 @@ dir /data"; then changed+=(redis); fi
     install -m 0644 "$rel_dir/oauth2-proxy/compose.yml" "$dir/compose.yml"
     run "sign-in images" compose -p pspm-signin -f "$dir/compose.yml" pull --quiet || warn "Could not pull the sign-in images."
     run "sign-in containers" compose -p pspm-signin -f "$dir/compose.yml" up -d --remove-orphans || warn "Could not start the sign-in containers (see log)."
+    # Without --no-deps: a container recreated with it counts as outdated for the next
+    # plain "up -d", which recreated it again on every apply (seen with compose 2.26.1).
+    # Redis is running at this point and is not touched.
     local c
     for c in $(printf '%s\n' "${changed[@]}" | sort -u); do
-        run "recreate $c" compose -p pspm-signin -f "$dir/compose.yml" up -d --force-recreate --no-deps "$c" || warn "Could not restart $c."
+        run "recreate $c" compose -p pspm-signin -f "$dir/compose.yml" up -d --force-recreate "$c" || warn "Could not restart $c."
     done
     # configuration directories of removed providers
     local d
@@ -283,7 +286,9 @@ collect_facts() {
         certs=$(jq --arg n "$name" --arg fc "$d/fullchain.pem" --arg k "$d/privkey.pem" --arg na "$end" --argjson s "$sans" \
             '. + [{name: $n, fullchain: $fc, key: $k, sans: $s, not_after: $na}]' <<<"$certs")
     done
-    for h in $(jq -r '.document.backends[]?.servers[]?.addr' <<<"$rev_json" | sed -E 's/:[0-9]+$//' | grep -v -E '^\[|^[0-9.]+$' | sort -u); do
+    # host names only (IP addresses need no lookup); "|| true": grep exits 1 when every
+    # backend is an IP address, which is not an error
+    for h in $(jq -r '.document.backends[]?.servers[]?.addr' <<<"$rev_json" | sed -E 's/:[0-9]+$//' | { grep -v -E '^\[|^[0-9.]+$' || true; } | sort -u); do
         if getent ahosts "$h" >/dev/null; then resolved=$(jq --arg h "$h" '.[$h] = true' <<<"$resolved")
         else resolved=$(jq --arg h "$h" '.[$h] = false' <<<"$resolved"); warn "Backend host $h does not resolve."; fi
     done
@@ -390,12 +395,12 @@ rollback_to() {
 }
 
 record_apply() {
-    local rev=$1 rel=$2 msha=$3 result=$4 msg=$5 started=$6
-    jq -n --argjson rev "${rev:-0}" --arg rel "$rel" --arg m "$msha" --arg c "${CODE_COMMIT:-}" --arg u "${SUDO_USER:-root}" \
+    local rev=$1 rel=$2 msha=$3 result=$4 msg=$5 started=$6 json
+    json=$(jq -n --argjson rev "${rev:-0}" --arg rel "$rel" --arg m "$msha" --arg c "${CODE_COMMIT:-}" --arg u "${SUDO_USER:-root}" \
         --arg r "$result" --arg msg "$msg" --arg log "$LOG_FILE" --arg s "$started" \
         --arg ex "$(tail -n 60 "$LOG_FILE" 2>/dev/null)" \
-        '{revision_id: $rev, release: $rel, manifest_sha: $m, code_commit: $c, ssh_user: $u, result: $r, message: $msg, log_file: $log, log_excerpt: $ex, started_at: $s}' \
-        | as_pspm php "$(app_dir)/bin/revision.php" record-apply >>"$LOG_FILE" 2>&1 \
+        '{revision_id: $rev, release: $rel, manifest_sha: $m, code_commit: $c, ssh_user: $u, result: $r, message: $msg, log_file: $log, log_excerpt: $ex, started_at: $s}')
+    run_quiet "record apply" as_pspm php "$(app_dir)/bin/revision.php" record-apply <<<"$json" \
         || warn "Could not record the apply in the database (it is in this log)."
 }
 

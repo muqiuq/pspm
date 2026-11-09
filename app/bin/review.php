@@ -18,12 +18,48 @@ $rank = fn(array $c) => in_array('public', $c, true) ? 99 : count($c);
 $lines = [];
 $opens = [];
 $conds = fn(array $s) => $s['access']['conditions'] ?? [];
+$op = array_column($old['providers'] ?? [], null, 'id'); $np = array_column($new['providers'] ?? [], null, 'id');
+$noSignin = ['mode' => 'none', 'provider' => '', 'groups' => [], 'emails' => [], 'domains' => []];
+// Who may sign in on a site: its own limits, or else everyone the provider accepts.
+$signinWho = function (array $si) use ($np): string {
+    $p = $np[$si['provider'] ?? ''] ?? null;
+    $who = [];
+    foreach (['groups' => 'groups', 'emails' => 'e-mails', 'domains' => 'e-mail domains'] as $k => $label) {
+        if (!empty($si[$k])) $who[] = "$label " . implode(' ', $si[$k]);
+    }
+    if (!$who) $who[] = !$p ? 'any account' : (in_array('*', $p['email_domains'], true) ? 'any account of the tenant' : 'any account from ' . implode(' ', $p['email_domains']));
+    return ($p ? $p['name'] . ': ' : '') . implode('; ', $who);
+};
+// The access of a site in words, sign-in included (plan §12.3: alternative = OR, required = AND).
+$reach = function (array $s) use ($conds, $signinWho, $noSignin): string {
+    $si = ($s['access']['signin'] ?? []) + $noSignin;
+    $c = implode(', ', $conds($s));
+    if ($si['mode'] === 'alternative') return "$c, or Microsoft sign-in (" . $signinWho($si) . ')';
+    if ($si['mode'] === 'required') return "$c, and only after Microsoft sign-in (" . $signinWho($si) . ')';
+    return $c;
+};
+$routeOpens = function (string $name, array $s, ?array $o) use (&$opens): void {
+    $orout = array_column($o['routes'] ?? [], null, 'id');
+    foreach ($s['routes'] ?? [] as $r) {
+        $or = $o === null ? null : ($orout[$r['id']] ?? null);
+        $paths = implode(' ', $r['paths']);
+        $pub = in_array('public', $r['overrides']['access']['conditions'] ?? [], true);
+        if ($pub && (!$or || !in_array('public', $or['overrides']['access']['conditions'] ?? [], true))) $opens[] = "site $name: route $paths is public";
+        $rs = $r['overrides']['access']['signin'] ?? null;
+        if ($rs === 'alternative' && ($or['overrides']['access']['signin'] ?? null) !== 'alternative' && ($s['access']['signin']['mode'] ?? 'none') !== 'alternative') {
+            $opens[] = "site $name: route $paths accepts Microsoft sign-in as an alternative";
+        }
+        // "none" only widens a site that requires sign-in (with "alternative" it narrows)
+        if ($rs === 'none' && ($or['overrides']['access']['signin'] ?? null) !== 'none' && ($s['access']['signin']['mode'] ?? 'none') === 'required') $opens[] = "site $name: route $paths without the required sign-in";
+    }
+};
 foreach ($ns as $id => $s) {
     $name = $s['hosts'][0];
     if (!isset($os[$id])) {
         if (!empty($s['enabled'])) {
-            $lines[] = "+ site $name (" . implode(', ', $conds($s)) . ')';
-            $opens[] = "new site $name, reachable by: " . implode(', ', $conds($s));
+            $lines[] = "+ site $name (" . $reach($s) . ')';
+            $opens[] = "new site $name, reachable by: " . $reach($s);
+            $routeOpens($name, $s, null);
         } else $lines[] = "+ site $name (disabled)";
         continue;
     }
@@ -42,14 +78,9 @@ foreach ($ns as $id => $s) {
         $what[] = 'access ' . implode(',', $conds($o)) . ' → ' . implode(',', $conds($s));
         if (array_diff($conds($s), $conds($o))) $opens[] = "site $name accepts more: " . implode(', ', $conds($s));
     }
-    $orout = array_column($o['routes'] ?? [], null, 'id');
-    foreach ($s['routes'] ?? [] as $r) {
-        $or = $orout[$r['id']] ?? null;
-        $pub = in_array('public', $r['overrides']['access']['conditions'] ?? [], true);
-        if ($pub && (!$or || !in_array('public', $or['overrides']['access']['conditions'] ?? [], true))) {
-            $opens[] = "site $name: route " . implode(' ', $r['paths']) . ' is public';
-        }
-    }
+    if (($o['access']['signin'] ?? $noSignin) !== ($s['access']['signin'] ?? $noSignin)) $what[] = 'sign-in';
+    elseif (($o['access'] ?? null) !== ($s['access'] ?? null) && $conds($o) === $conds($s)) $what[] = 'access';
+    $routeOpens($name, $s, $o);
     $newPorts = array_diff(array_column($s['listeners'] ?? [], 'port'), array_column($o['listeners'] ?? [], 'port'));
     if ($newPorts) $opens[] = "site $name listens on new ports: " . implode(', ', $newPorts);
     foreach (['tls', 'port80', 'client_certs', 'limits', 'proxy', 'headers', 'routes', 'listeners', 'description'] as $k) {
@@ -67,7 +98,6 @@ foreach ($ob as $id => $b) if (!isset($nb[$id])) $lines[] = "- backend {$b['name
 $oc = array_column($old['cas'] ?? [], null, 'id'); $nc = array_column($new['cas'] ?? [], null, 'id');
 foreach ($nc as $id => $c) if (!isset($oc[$id])) { $lines[] = "+ trusted CA {$c['name']}"; $opens[] = "nginx trusts a new CA for client certificates: {$c['name']} (SHA-256 " . substr($c['fingerprint_sha256'], 0, 16) . '…)'; }
 foreach ($oc as $id => $c) if (!isset($nc[$id])) $lines[] = "- trusted CA {$c['name']}";
-$op = array_column($old['providers'] ?? [], null, 'id'); $np = array_column($new['providers'] ?? [], null, 'id');
 foreach ($np as $id => $p) {
     if (!isset($op[$id])) { $lines[] = "+ sign-in provider {$p['name']} ({$p['signin_host']})"; $opens[] = "new sign-in provider {$p['name']}: tenant {$p['tenant_id']}, client {$p['client_id']}"; continue; }
     $o = $op[$id];
@@ -81,12 +111,17 @@ foreach ($np as $id => $p) {
 foreach ($op as $id => $p) if (!isset($np[$id])) $lines[] = "- sign-in provider {$p['name']}";
 foreach ($ns as $id => $s) {
     if (!isset($os[$id])) continue;
-    $o = $os[$id]['access']['signin'] ?? ['mode' => 'none', 'groups' => [], 'emails' => [], 'domains' => []];
-    $n = $s['access']['signin'] ?? ['mode' => 'none', 'groups' => [], 'emails' => [], 'domains' => []];
-    if ($o['mode'] !== 'none' && $n['mode'] === 'none') $opens[] = "site {$s['hosts'][0]}: sign-in removed";
-    if ($o['mode'] === 'required' && $n['mode'] === 'alternative') $opens[] = "site {$s['hosts'][0]}: sign-in is now an alternative instead of required";
-    foreach (['groups', 'emails', 'domains'] as $k) {
-        if (($o[$k] ?? []) && (!($n[$k] ?? []) || array_diff($n[$k], $o[$k]))) $opens[] = "site {$s['hosts'][0]}: more users may sign in ($k)";
+    $o = ($os[$id]['access']['signin'] ?? []) + $noSignin;
+    $n = ($s['access']['signin'] ?? []) + $noSignin;
+    $name = $s['hosts'][0];
+    if ($o['mode'] !== 'none' && $n['mode'] === 'none') $opens[] = "site $name: sign-in removed";
+    if ($o['mode'] === 'none' && $n['mode'] === 'alternative') $opens[] = "site $name: Microsoft sign-in added as an alternative (" . $signinWho($n) . ')';
+    if ($o['mode'] === 'required' && $n['mode'] === 'alternative') $opens[] = "site $name: sign-in is now an alternative instead of required (" . $signinWho($n) . ')';
+    if ($o['mode'] !== 'none' && $n['mode'] !== 'none' && $o['provider'] !== $n['provider']) $opens[] = "site $name: signs in with another provider (" . $signinWho($n) . ')';
+    if ($o['mode'] !== 'none' && $n['mode'] !== 'none') {
+        foreach (['groups', 'emails', 'domains'] as $k) {
+            if ($o[$k] && (!$n[$k] || array_diff($n[$k], $o[$k]))) $opens[] = "site $name: more users may sign in ($k: " . ($n[$k] ? implode(' ', $n[$k]) : 'no limit') . ')';
+        }
     }
 }
 $og = $old['global'] ?? []; $ng = $new['global'] ?? [];
