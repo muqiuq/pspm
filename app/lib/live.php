@@ -181,10 +181,18 @@ final class Live
         return $out;
     }
 
-    /** Facts for a preview render: the last facts install.sh collected, with fresh certificates. */
+    /**
+     * Facts for a preview render: those the live release was rendered with (IPv6, resolved
+     * backends, modules …), with fresh certificates. Without them the renderer's defaults
+     * would show differences that are not there (e.g. IPv6 listeners on a box without IPv6).
+     */
     public static function previewFacts(): array
     {
-        $f = Status::read('facts') ?? [];
+        $rel = self::currentRelease();
+        $f = [];
+        if ($rel !== null && is_readable($file = self::releasesDir() . "/$rel/facts.json")) {
+            try { $f = (array)(json_dec((string)file_get_contents($file)) ?? []); } catch (Throwable) { $f = []; }
+        }
         $certs = self::certs();
         if ($certs || !isset($f['certs'])) $f['certs'] = $certs;
         $f['release'] = 'preview';

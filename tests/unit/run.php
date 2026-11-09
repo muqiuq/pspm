@@ -169,6 +169,30 @@ eq($rs['summary']['admin']['signin'], $doc['providers'][0]['id'], 'shared host: 
 $two = $doc; $p2 = $doc['providers'][0]; $p2['id'] = 'ffffffff-ffff-4fff-8fff-ffffffffffff'; $p2['name'] = 'Second'; $p2['port'] = 4182; $two['providers'][] = $p2;
 ok((bool)array_filter(Model::checkDocument($two), fn($e) => str_contains($e, 'used by two providers')), 'two providers with one sign-in host are refused');
 
+// Changes page: an unchanged working copy previews without differences, also on a box
+// without IPv6 (the preview uses the facts the live release was rendered with)
+$etc = sys_get_temp_dir() . '/pspm-preview-' . getmypid();
+$previewCode = 'require ' . var_export(realpath(__DIR__ . '/../../app/lib/bootstrap.php'), true) . ';
+    $doc = json_dec(file_get_contents(' . var_export(realpath(__DIR__ . '/../fixtures/document.json'), true) . '));
+    $facts = json_dec(file_get_contents(' . var_export(realpath(__DIR__ . '/../fixtures/facts.json'), true) . '));
+    $facts["ipv6"] = false; $facts["release"] = "r1";
+    $rel = PSPM_NGINX . "/releases/r1";
+    foreach ((new Renderer(["id" => 1, "document" => $doc], $facts))->render()["files"] as $p => $c) { @mkdir(dirname("$rel/$p"), 0755, true); file_put_contents("$rel/$p", $c); }
+    file_put_contents("$rel/facts.json", json_enc($facts));
+    symlink("releases/r1", PSPM_NGINX . "/current");
+    $diff = fn(array $f) => array_keys(array_diff_key(Diff::trees(Live::files(null, true), (new Renderer(["id" => "wc", "document" => $doc], $f))->render()["files"]), ["conf/release.conf" => 1]));
+    echo json_encode(["live_facts" => $diff(Live::previewFacts()), "defaults" => $diff([])]);';
+@mkdir("$etc/nginx/releases", 0755, true);
+$p = proc_open([PHP_BINARY, '-r', $previewCode], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, ['PSPM_ETC' => $etc] + getenv());
+$pvOut = stream_get_contents($pipes[1]); $pvErr = stream_get_contents($pipes[2]); proc_close($p);
+exec('rm -rf ' . escapeshellarg($etc));
+$pv = json_decode((string)$pvOut, true);
+ok(is_array($pv), 'preview test ran' . (is_array($pv) ? '' : ": $pvErr$pvOut"));
+if (is_array($pv)) {
+    eq($pv['live_facts'], [], 'unchanged working copy: no differences with the live release\'s facts');
+    ok($pv['defaults'] !== [], 'with the renderer\'s defaults it would show differences (the bug this guards against)');
+}
+
 // Review (install.sh): sign-in is part of what a site is reachable by
 $review = function (?array $old, array $new): string {
     $dir = sys_get_temp_dir();
