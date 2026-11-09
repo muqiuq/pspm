@@ -1,0 +1,16 @@
+[Unit]
+Description=PSPM firewall: chain PSPM-INPUT and its sets, at boot before nginx
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Before=network-pre.target nginx.service docker.service
+Wants=network-pre.target
+ConditionPathExists=/usr/local/lib/pspm/pspm-agent.php
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/php /usr/local/lib/pspm/pspm-agent.php setup
+ExecStart=-/usr/bin/php /usr/local/lib/pspm/pspm-agent.php sync
+
+[Install]
+WantedBy=multi-user.target

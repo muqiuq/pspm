@@ -1,0 +1,11 @@
+/* PSPM styles on top of Bootstrap 5. */
+.tile .card-title { margin-bottom: .5rem; }
+.tile .small > div { margin-bottom: .15rem; }
+pre.diff, pre.log { max-height: 70vh; overflow: auto; white-space: pre; }
+pre.diff .add { color: #146c43; background: #e7f5ec; display: inline-block; width: 100%; }
+pre.diff .del { color: #b02a37; background: #fbeaec; display: inline-block; width: 100%; }
+pre.diff .hunk { color: #6c757d; }
+.help h2 { font-size: 1.3rem; margin-top: 1rem; }
+.help h3 { font-size: 1.1rem; margin-top: 1rem; }
+.help h4, .help h5 { font-size: 1rem; }
+details > summary { cursor: pointer; }

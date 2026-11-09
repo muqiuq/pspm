@@ -1,0 +1,10 @@
+[Unit]
+Description=PSPM agent: firewall sets from the snapshot files, status for the dashboard
+After=network-online.target pspm-firewall.service
+ConditionPathExists=/usr/local/lib/pspm/pspm-agent.php
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php /usr/local/lib/pspm/pspm-agent.php sync
+Nice=5
+TimeoutStartSec=120

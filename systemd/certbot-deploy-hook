@@ -1,0 +1,6 @@
+#!/bin/sh
+# PSPM: after a certificate renewal, test and reload nginx (same lock as install.sh).
+# Inside an install.sh run (which holds the lock and reloads itself) this does nothing.
+[ -n "$PSPM_INSTALL_LOCKED" ] && exit 0
+exec flock -w 300 /run/lock/pspm.lock sh -c \
+  'nginx -t -q -p /etc/pspm/nginx/current/ -c nginx.conf && systemctl reload nginx'

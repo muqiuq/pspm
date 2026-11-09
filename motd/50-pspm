@@ -1,0 +1,10 @@
+#!/bin/sh
+# PSPM: how to reach the UI, shown at every SSH login (plan §8.2). Only prints a file
+# the agent writes every minute: instant, no database, no network.
+f=/var/lib/pspm/status/motd
+if [ -r "$f" ] && [ $(( $(date +%s) - $(stat -c %Y "$f") )) -lt 600 ]; then
+    cat "$f"
+else
+    printf 'PSPM · Secure Proxy Manager (status not current)\n'
+    printf '  Tunnel:   ssh -L 9443:127.0.0.1:9443 %s@%s   then https://localhost:9443/\n' "${USER:-root}" "$(hostname -f 2>/dev/null || hostname)"
+fi

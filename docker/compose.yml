@@ -1,0 +1,24 @@
+# PSPM PostgreSQL (plan §10.2). Started by install.sh:
+#   docker compose -p pspm -f /opt/pspm/docker/compose.yml up -d
+# The image tag is changed deliberately, never "latest". install.sh logs the digest it runs.
+services:
+  postgres:
+    image: postgres:18.3
+    container_name: pspm-postgres
+    network_mode: none                          # no network at all: Unix socket only
+    restart: unless-stopped
+    env_file: /etc/pspm/db.env
+    environment:
+      # Password authentication on the socket too (the image's default would be "trust").
+      POSTGRES_INITDB_ARGS: "--auth-local=scram-sha-256 --auth-host=scram-sha-256"
+    volumes:
+      - /var/lib/pspm/postgres:/var/lib/postgresql
+      - /run/pspm/postgres:/var/run/postgresql   # the socket, shared with the host
+    shm_size: 256m
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "pspm", "-d", "pspm", "-h", "/var/run/postgresql"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s

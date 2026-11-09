@@ -1,0 +1,9 @@
+[Unit]
+Description=PSPM agent: run when snapshot files change
+
+[Path]
+PathChanged=/var/lib/pspm/state
+Unit=pspm-agent.service
+
+[Install]
+WantedBy=multi-user.target
