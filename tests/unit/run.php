@@ -69,11 +69,26 @@ foreach ($r['files'] as $p => $content) {
     if (!str_starts_with($p, 'sites/')) continue;
     // every proxying location sets every identity header (plan §12.4)
     preg_match_all('/location [^{]+\{(.*?)\n    \}/s', $content, $m);
-    foreach ($m[1] as $body) if (str_contains($body, 'proxy_pass')) foreach (Renderer::IDENTITY_HEADERS as $hn) ok(str_contains($body, "proxy_set_header $hn \"\";"), "$p: $hn blanked");
+    // every proxying location sets every identity header: to the signed-in identity or to empty (plan §12.4)
+    foreach ($m[1] as $body) if (str_contains($body, 'proxy_pass') && !str_contains($body, 'internal;')) foreach (Renderer::IDENTITY_HEADERS as $hn) {
+        ok((bool)preg_match('/proxy_set_header ' . preg_quote($hn, '/') . ' ("";|\$pspm_[a-z]+;)/', $body), "$p: $hn always set");
+    }
 }
 $r2 = (new Renderer(['id' => 1, 'document' => $doc], $facts))->render();
 eq($r2['files'], $r['files'], 'deterministic output');
 ok(isset($r['summary']['pending_certs']['0']) || $r['summary']['pending_certs'] !== null, 'summary has pending certs');
+
+// Sign-in: providers render, the token header is blanked unless the site forwards it
+ok(isset($r['files']['oauth2-proxy/peeeeeeee.cfg']) && isset($r['files']['oauth2-proxy/compose.yml']), 'oauth2-proxy config and compose rendered');
+$cfg = $r['files']['oauth2-proxy/peeeeeeee.cfg'];
+ok(str_contains($cfg, 'whitelist_domains = ["app.example.ch", "auth.example.ch", "www.app.example.ch"]'), 'redirect whitelist lists the exact host names');
+ok(str_contains($cfg, 'code_challenge_method = "S256"') && str_contains($cfg, 'session_store_type = "redis"'), 'PKCE and Redis sessions');
+ok(!preg_match('/secret/i', preg_replace('/^#.*$/m', '', $cfg)), 'no secret in the rendered config');
+ok(str_contains($r['files']['sites/app.example.ch.conf'], 'proxy_set_header X-Forwarded-Access-Token "";'), 'access token not forwarded by default');
+ok(str_contains($r['files']['sites/app.example.ch.conf'], 'proxy_set_header X-Forwarded-Email $pspm_email;'), 'selected identity header carries the identity');
+ok(str_contains($r['files']['sites/new.example.ch.conf'], 'proxy_set_header X-Forwarded-Email "";'), 'sites without sign-in blank the identity headers');
+$bad2 = $doc; $bad2['sites'][0]['hosts'][] = 'app.other.test';
+ok((bool)array_filter(Model::checkDocument($bad2), fn($e) => str_contains($e, 'cookie domain')), 'a host outside the cookie domain is refused');
 
 // Diff
 ok(str_contains(Diff::unified("a\nb\nc\n", "a\nB\nc\n"), "-b\n+B"), 'diff shows change');

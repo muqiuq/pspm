@@ -1,17 +1,56 @@
 {
-  "release": "20261109-120000-r1",
-  "now": "2026-11-09T12:00:00Z",
-  "ipv6": true,
-  "ca_bundle": false,
-  "addresses": ["192.168.1.10", "2001:db8::10"],
-  "ssh_ports": [22],
-  "resolved": {"app.internal": true, "gone.internal": false},
-  "certs": [
-    {"name": "pspm-app-example-ch", "fullchain": "/etc/letsencrypt/live/pspm-app-example-ch/fullchain.pem", "key": "/etc/letsencrypt/live/pspm-app-example-ch/privkey.pem",
-     "sans": ["app.example.ch", "www.app.example.ch"], "not_after": "2027-02-01T00:00:00Z"},
-    {"name": "pspm-admin", "fullchain": "/etc/letsencrypt/live/pspm-admin/fullchain.pem", "key": "/etc/letsencrypt/live/pspm-admin/privkey.pem",
-     "sans": ["proxy.example.ch"], "not_after": "2027-02-01T00:00:00Z"}
-  ],
-  "paths": {"app_public": "/srv/pspm/app/current/public", "app_assets": "/srv/pspm/app/current/assets", "php_socket": "/run/php/pspm-fpm.sock",
-            "acme_root": "/var/www/acme", "state_dir": "/var/lib/pspm/state", "ip_cert": "/etc/pspm/tls/ip.crt", "ip_key": "/etc/pspm/tls/ip.key"}
+ "release": "20261109-120000-r1",
+ "now": "2026-11-09T12:00:00Z",
+ "ipv6": true,
+ "ca_bundle": false,
+ "addresses": [
+  "192.168.1.10",
+  "2001:db8::10"
+ ],
+ "ssh_ports": [
+  22
+ ],
+ "resolved": {
+  "app.internal": true,
+  "gone.internal": false
+ },
+ "certs": [
+  {
+   "name": "pspm-app-example-ch",
+   "fullchain": "/etc/letsencrypt/live/pspm-app-example-ch/fullchain.pem",
+   "key": "/etc/letsencrypt/live/pspm-app-example-ch/privkey.pem",
+   "sans": [
+    "app.example.ch",
+    "www.app.example.ch"
+   ],
+   "not_after": "2027-02-01T00:00:00Z"
+  },
+  {
+   "name": "pspm-admin",
+   "fullchain": "/etc/letsencrypt/live/pspm-admin/fullchain.pem",
+   "key": "/etc/letsencrypt/live/pspm-admin/privkey.pem",
+   "sans": [
+    "proxy.example.ch"
+   ],
+   "not_after": "2027-02-01T00:00:00Z"
+  },
+  {
+   "name": "pspm-signin-peeeeeeee",
+   "fullchain": "/etc/letsencrypt/live/pspm-signin-peeeeeeee/fullchain.pem",
+   "key": "/etc/letsencrypt/live/pspm-signin-peeeeeeee/privkey.pem",
+   "sans": [
+    "auth.example.ch"
+   ],
+   "not_after": "2027-02-01T00:00:00Z"
+  }
+ ],
+ "paths": {
+  "app_public": "/srv/pspm/app/current/public",
+  "app_assets": "/srv/pspm/app/current/assets",
+  "php_socket": "/run/php/pspm-fpm.sock",
+  "acme_root": "/var/www/acme",
+  "state_dir": "/var/lib/pspm/state",
+  "ip_cert": "/etc/pspm/tls/ip.crt",
+  "ip_key": "/etc/pspm/tls/ip.key"
+ }
 }

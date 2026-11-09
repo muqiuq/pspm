@@ -46,16 +46,19 @@ Every `install.sh` run writes `/var/log/pspm/install-<time>.log` (`install-lates
 
 ## Status of the build
 
-Built (plan phases P0–P3, in part):
+Everything in the plan's phases P0–P6 is built:
 
-- `install.sh`: all 14 phases, apply with review, `nginx -t`, atomic switch, verify and automatic rollback, drift detection, Let's Encrypt, `update`, `rollback`, `status`, `doctor`, `report`, `firewall on|off`
-- PostgreSQL 18 in Docker (Unix socket only), migrations, pre-install dumps
-- Web UI: dashboard, sites with routes, backends, access (single-site links, cleared addresses, bans, blocks), changes (preview diff, revisions, applies, live files, drift), settings, users, activity, help
+- `install.sh`: all 14 phases, apply with review, `nginx -t`, atomic switch, verify and automatic rollback, drift detection, Let's Encrypt, `update`, `rollback`, `status`, `doctor`, `report`, `firewall on|off`, `--import`
+- PostgreSQL 18 in Docker (Unix socket only), migrations, pre-install and nightly backups
+- Web UI: dashboard, sites with routes, backends, access (single-site links, cleared addresses, bans, blocks), certificates, Microsoft sign-in, security, changes, settings, users, backup, activity, help
 - Sign-in with mandatory TOTP, sessions in the database, re-authentication, recovery scripts
-- Lua gates (LAN, cleared, certificate, public; bans and blocks), snapshot files and sync
-- Agent: firewall chain and sets on every port (allow, web-only allow, block), SSH login message, update check
+- Client-certificate PKI with the CA key on the server (passphrase-wrapped), revocation, scopes, strict mode
+- Microsoft (Entra ID) sign-in through oauth2-proxy and Redis, OR/AND with the other conditions, identity headers, cookie stripping
+- Security scan: trust registry, AI verdicts (OpenAI-compatible, e.g. OpenRouter), guards, escalation, circuit breaker; behaviour analysis with reaction deadlines; honeypots; unknown-host rule
+- External blocklists into the firewall; e-mail notifications through SMTP
+- Export/import of everything as one JSON file (secrets encrypted); CLI export/import with Let's Encrypt material
 
-Not built yet: client-certificate PKI (P3), Microsoft sign-in with oauth2-proxy and Redis (P4), security scan, AI verdicts, behaviour analysis, honeypots, external blocklists, e-mail notifications (P5), JSON export/import (P6).
+Tested on Debian 13 in a systemd container (nested Docker, real nginx, oauth2-proxy and Redis); not yet on a real server.
 
 ## Development
 
@@ -63,5 +66,6 @@ Not built yet: client-certificate PKI (P3), Microsoft sign-in with oauth2-proxy 
 docker build -t pspm-test:trixie tests/docker            # Debian 13 with nginx, Lua, PHP 8.4
 docker run --rm -v "$PWD:/src:ro" pspm-test:trixie php /src/tests/unit/run.php
 docker run --rm -v "$PWD:/src:ro" pspm-test:trixie bash /src/tests/nginx-check.sh
-bash tests/run-smoke.sh                                   # UI flow against PostgreSQL 18
+bash tests/run-smoke.sh                                   # UI, PKI, security, export/import against PostgreSQL 18 and Mailpit
+# end to end in a Debian 13 box with systemd: see tests/docker/systemd and tests/box-e2e.sh
 ```

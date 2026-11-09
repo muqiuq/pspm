@@ -1,0 +1,11 @@
+[Unit]
+Description=PSPM nightly backup (timer)
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=20min
+Persistent=true
+Unit=pspm-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=PSPM security scan (security log, AI verdicts, behaviour, honeypots) (timer)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=pspm-secscan.service
+
+[Install]
+WantedBy=timers.target

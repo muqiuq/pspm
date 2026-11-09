@@ -55,7 +55,7 @@ check($c === 303 && $loc === '/', 'the right code completes the sign-in');
 [$c, $b] = req('GET', '/');
 check($c === 200 && str_contains($b, 'Proxy') && str_contains($b, 'Changes'), 'dashboard renders');
 check(!str_contains($b, 'Philipp'), 'the dashboard does not show the full name');
-foreach (['/sites', '/backends', '/access', '/changes', '/settings', '/activity', '/help', '/account', '/about', '/sites/edit', '/backends/edit'] as $p) {
+foreach (['/sites', '/backends', '/access', '/certificates', '/signin', '/security', '/security?tab=behaviour', '/security?tab=traps', '/security?tab=blocklists', '/security?tab=trusted', '/security?tab=verdicts', '/backup', '/changes', '/settings', '/activity', '/help', '/account', '/about', '/sites/edit', '/backends/edit'] as $p) {
     [$c, $b] = req('GET', $p);
     check($c === 200, "GET $p");
 }

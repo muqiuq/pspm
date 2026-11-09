@@ -61,14 +61,23 @@ $tiles[] = tile('Sites', $pending ? 'amber' : (count($sites) ? 'green' : 'grey')
 // Certificates
 $certs = Live::certs();
 usort($certs, fn($a, $b) => strcmp($a['not_after'], $b['not_after']));
+$level = 'grey';
+$b = '';
 if ($certs) {
     $next = $certs[0];
     $days = (int)floor((strtotime($next['not_after']) - time()) / 86400);
-    $b = '<div>' . count($certs) . ' Let\'s Encrypt certificates</div><div>Next expiry: ' . h($next['name']) . ' in ' . $days . ' days</div>';
-    $tiles[] = tile('Certificates', $days < 7 ? 'red' : ($days < 20 ? 'amber' : 'green'), $b);
+    $b .= '<div>' . count($certs) . ' Let\'s Encrypt certificates; next expiry: ' . h($next['name']) . ' in ' . $days . ' days</div>';
+    $level = $days < 7 ? 'red' : ($days < 20 ? 'amber' : 'green');
 } else {
-    $tiles[] = tile('Certificates', 'grey', 'No Let\'s Encrypt certificate yet.');
+    $b .= '<div>No Let\'s Encrypt certificate yet.</div>';
 }
+$soon = (int)DB::val("SELECT count(*) FROM client_certs WHERE revoked_at IS NULL AND not_after BETWEEN now() AND now() + interval '30 days'");
+$new7 = DB::all("SELECT subject_cn FROM client_certs WHERE issued_at > now() - interval '7 days' ORDER BY issued_at DESC");
+$caSoon = DB::all("SELECT name FROM cas WHERE not_after < now() + interval '1 year'");
+if ($soon) { $b .= "<div>$soon client certificates expire within 30 days</div>"; if ($level !== 'red') $level = 'amber'; }
+if ($new7) $b .= '<div>Issued in 7 days: ' . h(implode(', ', array_slice(array_column($new7, 'subject_cn'), 0, 5))) . (count($new7) > 5 ? ' …' : '') . '</div>';
+if ($caSoon) { $b .= '<div class="text-danger">CA expiring within a year: ' . h(implode(', ', array_column($caSoon, 'name'))) . '</div>'; $level = 'red'; }
+$tiles[] = tile('Certificates', $level, $b, '/certificates');
 
 // Access
 $cleared = (int)DB::val('SELECT count(*) FROM cleared_ips WHERE expires_at IS NULL OR expires_at > now()');
@@ -84,6 +93,52 @@ if ($fw) $b .= '<div>' . h($fw['sets']['pspm-block4'] ?? 0) . ' + ' . h($fw['set
 else $b .= '<div>Firewall state: no report from the agent yet</div>';
 $tiles[] = tile('Blocks', $fw ? 'green' : 'grey', $b);
 
+// Blocklists
+$lists = DB::all('SELECT name, mode, enabled, last_status FROM blocklists WHERE enabled');
+if ($lists) {
+    $lv = ['green' => 0, 'amber' => 0, 'red' => 0];
+    foreach ($lists as $l) { $st = json_dec($l['last_status']) ?? []; $lv[$st['level'] ?? 'amber'] = ($lv[$st['level'] ?? 'amber'] ?? 0) + 1; }
+    $drop = 0;
+    foreach (($fw['counters'] ?? []) as $c) if (str_contains($c['rule'], 'pspm-feed')) $drop += $c['packets'];
+    $b = "<div>{$lv['green']} OK, {$lv['amber']} warning, {$lv['red']} failed</div>";
+    if ($fw) $b .= '<div>' . (int)(($fw['sets']['pspm-feed4'] ?? 0) + ($fw['sets']['pspm-feed6'] ?? 0)) . ' entries loaded; ' . $drop . ' packets dropped since the rules were set</div>';
+    $tiles[] = tile('Blocklists', $lv['red'] ? 'red' : ($lv['amber'] ? 'amber' : 'green'), $b, '/security?tab=blocklists');
+}
+
+// Security scan
+$ai = AI::settings();
+$scanState = Settings::get('scan', []);
+$lastRun = DB::one('SELECT started_at, stats FROM scan_runs ORDER BY id DESC LIMIT 1');
+$runAge = $lastRun ? time() - strtotime($lastRun['started_at']) : null;
+$b = '<div>Mode: ' . h($ai['mode']) . ' · AI: ' . (AI::configured() ? h($ai['model']) : 'off') . '</div><div>Last run: ' . ($lastRun ? h(ago($lastRun['started_at'])) : 'never') . '</div>';
+$b .= '<div>Blocks in 24 h: ' . (int)DB::val("SELECT count(*) FROM block_history WHERE created_by = 'system' AND created_at > now() - interval '24 hours'") . '</div>';
+if ($scanState['breaker_tripped'] ?? false) $b .= '<div class="text-danger">Circuit breaker tripped: dry-run until an admin resets it</div>';
+$tiles[] = tile('Security scan', ($scanState['breaker_tripped'] ?? false) ? 'red' : ($runAge === null || $runAge > 600 ? 'amber' : 'green'), $b, '/security');
+
+// Behaviour
+$open = DB::all("SELECT actor_type, actor, pattern, risk, authorised, deadline FROM risk_findings WHERE status = 'open' ORDER BY risk DESC");
+if ($open) {
+    $auth = array_filter($open, fn($f) => $f['authorised']);
+    $next = array_filter($open, fn($f) => $f['deadline']);
+    usort($next, fn($a, $b) => strcmp($a['deadline'], $b['deadline']));
+    $b = '<div>' . count($open) . ' open findings, highest risk ' . (int)$open[0]['risk'] . '</div>';
+    if ($next) $b .= '<div>Next block if nobody reacts: ' . h(Behaviour::describe($next[0]['actor_type'], $next[0]['actor'])) . ' ' . h(ago($next[0]['deadline'])) . '</div>';
+    if ($auth) $b .= '<div class="text-danger">' . count($auth) . ' concern authorised actors</div>';
+    $tiles[] = tile('Behaviour', $auth ? 'red' : 'amber', $b, '/security?tab=behaviour');
+} else {
+    $tiles[] = tile('Behaviour', 'green', 'No open findings.', '/security?tab=behaviour');
+}
+
+// Sign-in
+$provs = Signin::providers();
+if ($provs) {
+    $down = 0; $b = '';
+    foreach ($provs as $p) { $r = Signin::ready((int)$p['port']); if ($r === false && Signin::users($p['id'])) $down++; $b .= '<div>' . h($p['name']) . ': ' . ($r ? 'running' : 'not running') . '</div>'; }
+    $sign = (int)DB::val("SELECT count(*) FROM behaviour_hours WHERE actor_type = 'user' AND hour > now() - interval '24 hours'");
+    $b .= "<div>Active signed-in users in 24 h: $sign</div>";
+    $tiles[] = tile('Sign-in', $down ? 'red' : 'green', $b, Auth::can('admin') ? '/signin' : '');
+}
+
 // System
 $dbSize = (int)DB::val('SELECT pg_database_size(current_database())');
 $disk = Status::diskFree('/');
@@ -98,6 +153,14 @@ $b = '<div>PostgreSQL up, ' . h(human_bytes($dbSize)) . '</div>';
 $b .= '<div>Last backup: ' . ($lastBackup ? h(human_secs(time() - $lastBackup)) . ' ago' : 'none yet') . '</div>';
 if ($disk) $b .= '<div>Disk: ' . h($disk['pct_used']) . '% used, ' . h(human_bytes($disk['free'])) . ' free</div>';
 $b .= '<div>Agent: ' . ($agentAge === null ? 'no heartbeat yet' : 'heartbeat ' . h(human_secs($agentAge)) . ' ago') . '</div>';
+if (Notify::configured()) {
+    $mailFail = (int)DB::val("SELECT count(*) FROM notification_outbox WHERE status IN ('pending', 'failed') AND attempts > 2");
+    $lastMail = DB::val("SELECT max(sent_at) FROM notification_outbox WHERE status IN ('sent', 'digested')");
+    $b .= '<div>E-mail: ' . ($mailFail ? "<strong>$mailFail undelivered</strong>" : 'ok') . ', last sent ' . h(ago($lastMail)) . '</div>';
+    if ($mailFail) $level = 'red';
+} else {
+    $b .= '<div>E-mail: no SMTP relay set</div>';
+}
 $up = Status::read('updates');
 $b .= '<div>Code: ' . h(Status::codeCommit()) . (($up['behind'] ?? 0) > 0 ? ', <strong>' . h($up['behind']) . ' updates available</strong>' : '') . '</div>';
 $tiles[] = tile('System', $level, $b);

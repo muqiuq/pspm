@@ -15,5 +15,6 @@ final class Audit
         $ip = PHP_SAPI === 'cli' ? null : IP::remote();
         DB::q('INSERT INTO audit_log (actor, ip, action, object, details) VALUES (?, ?, ?, ?, ?)',
             [self::actor(), $ip, $action, $object, $details]);
+        if (class_exists('Notify', false)) Notify::fromAudit($action, $object, $details, self::actor());
     }
 }

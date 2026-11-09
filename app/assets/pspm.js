@@ -65,5 +65,21 @@
     });
   });
 
+  // A freshly issued .p12 is in the page itself (no second request, nothing cached).
+  var p12 = document.getElementById('p12dl');
+  if (p12) {
+    var save = function (e) {
+      if (e) e.preventDefault();
+      var bin = atob(p12.getAttribute('data-b64')), buf = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([buf], { type: 'application/x-pkcs12' }));
+      a.download = p12.getAttribute('data-name');
+      document.body.appendChild(a); a.click(); a.remove();
+    };
+    p12.addEventListener('click', save);
+    if (p12.getAttribute('data-autostart')) save();
+  }
+
   if (window.bootstrap) document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(function (el) { new window.bootstrap.Tooltip(el); });
 })();

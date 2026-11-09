@@ -30,7 +30,8 @@ function site_from_post(): array
     foreach ((array)post('routes', []) as $r) {
         if (!is_array($r)) continue;
         $ov = [];
-        if (!empty($r['ov_conditions'])) $ov['access'] = ['conditions' => (array)$r['ov_conditions']];
+        if (!empty($r['ov_conditions'])) $ov['access'] = ['conditions' => (array)$r['ov_conditions']]
+            + (($r['ov_signin'] ?? '') !== '' ? ['signin' => (string)$r['ov_signin']] : []);
         if (trim((string)($r['ov_max_body'] ?? '')) !== '') $ov['max_body'] = $r['ov_max_body'];
         if (trim((string)($r['ov_read_timeout'] ?? '')) !== '') $ov['read_timeout'] = $r['ov_read_timeout'];
         if (!empty($r['ov_backend'])) $ov['backend'] = $r['ov_backend'];
@@ -49,7 +50,13 @@ function site_from_post(): array
                 'include_subdomains' => isset($_POST['hsts_sub']), 'preload' => isset($_POST['hsts_preload'])]],
         'port80' => post('port80'),
         'client_certs' => post('client_certs'),
-        'access' => ['conditions' => (array)post('conditions', []), 'denied' => post('denied'), 'denied_url' => post('denied_url')],
+        'access' => ['conditions' => (array)post('conditions', []), 'denied' => post('denied'), 'denied_url' => post('denied_url'),
+            'signin' => ['mode' => post('signin_mode', 'none'), 'provider' => post('signin_provider'),
+                'groups' => preg_split('/[\s,]+/', trim((string)post('signin_groups')), -1, PREG_SPLIT_NO_EMPTY) ?: [],
+                'emails' => preg_split('/[\s,]+/', trim((string)post('signin_emails')), -1, PREG_SPLIT_NO_EMPTY) ?: [],
+                'domains' => preg_split('/[\s,]+/', trim((string)post('signin_domains')), -1, PREG_SPLIT_NO_EMPTY) ?: [],
+                'headers' => (array)post('signin_headers', []), 'pass_token' => isset($_POST['signin_pass_token']),
+                'nonbrowser_401' => isset($_POST['signin_nb401'])]],
         'limits' => ['max_body' => post('max_body'), 'rate' => post('rate'), 'limit_conn' => post('limit_conn')],
         'proxy' => ['backend' => post('backend'), 'host_header' => post('host_header'), 'host_fixed' => post('host_fixed'),
             'connect_timeout' => post('connect_timeout'), 'read_timeout' => post('read_timeout'), 'send_timeout' => post('send_timeout'),
@@ -67,6 +74,12 @@ if (is_post()) {
     Auth::require('admin');
     $in = site_from_post();
     [$norm, $errors] = Validate::site($in, array_keys($backends));
+    $prov = Signin::providers();
+    if ($norm['access']['signin']['mode'] !== 'none' && !isset($prov[$norm['access']['signin']['provider']])) $errors['access.signin.provider'] = 'Choose a sign-in provider (Sign-in page).';
+    elseif ($norm['access']['signin']['mode'] !== 'none') {
+        $cd = $prov[$norm['access']['signin']['provider']]['cookie_domain'];
+        foreach ($norm['hosts'] as $h) if (!Signin::under($h, $cd)) $errors['access.signin.provider'] = "$h is outside the provider's cookie domain $cd.";
+    }
     $form = $in + ['id' => $id];
     if (!$errors) {
         [$newId, $err] = Model::saveSite($id, $norm, post('updated_at') ?: null);
@@ -107,6 +120,7 @@ function route_row(string $i, array $r, array $backendOpts, array $listenerOpts,
             . (in_array($k, $ov['access']['conditions'] ?? [], true) ? ' checked' : '') . '><label class="form-check-label small">' . h(explode(' (', $v)[0]) . '</label></div>';
     }
     $o .= field_err($errors, "routes.$i.access.conditions") . '</div>';
+    $o .= '<div class="col-md-12"><label class="form-label small">Sign-in for this route (with an access override)</label>' . $sel('ov_signin', ['' => 'site\'s', 'none' => 'none', 'alternative' => 'alternative', 'required' => 'required'], $ov['access']['signin'] ?? '') . '</div>';
     $o .= '<div class="col-md-2"><label class="form-label small">Max body</label><input class="form-control form-control-sm" name="routes[' . $i . '][ov_max_body]" value="' . h($ov['max_body'] ?? '') . '" placeholder="site"></div>';
     $o .= '<div class="col-md-2"><label class="form-label small">Read timeout (s)</label><input class="form-control form-control-sm" name="routes[' . $i . '][ov_read_timeout]" value="' . h($ov['read_timeout'] ?? '') . '" placeholder="site"></div>';
     $o .= '<div class="col-md-3"><label class="form-label small">Backend</label>' . $sel('ov_backend', ['' => 'site\'s'] + array_slice($backendOpts, 1, null, true), $ov['backend'] ?? '') . field_err($errors, "routes.$i.backend") . '</div>';
@@ -141,6 +155,20 @@ page_start($site ? 'Site ' . $site['hosts'][0] : 'New site', '/sites');
     <div class="row"><div class="col-md-6"><?= f_select('denied', 'When denied', $form['access']['denied'], ['403' => '403 Forbidden', '404' => '404 (reveal nothing)', 'redirect' => '302 to a URL', 'close' => 'close the connection']) ?></div>
       <div class="col-md-6"><?= f_text('denied_url', 'Redirect URL when denied', $form['access']['denied_url'], $errors, '', 'text', 'access.denied_url') ?></div></div>
     <?= f_select('client_certs', 'Client certificates', $form['client_certs'], ['optional' => 'request (optional)', 'off' => 'do not request'], $errors) ?>
+    <?php $si = ($form['access']['signin'] ?? []) + Validate::defaultSite()['access']['signin']; $provOpts = ['' => '— none —'];
+          foreach (Signin::providers() as $pid => $pp) $provOpts[$pid] = $pp['name'] . ' (' . $pp['signin_host'] . ')'; ?>
+    <h2 class="h6 mt-3">Sign-in with Microsoft</h2>
+    <div class="row">
+      <div class="col-md-6"><?= f_select('signin_mode', 'Sign-in', $si['mode'], ['none' => 'none', 'alternative' => 'alternative: the conditions OR signed in', 'required' => 'required: the conditions AND signed in']) ?></div>
+      <div class="col-md-6"><?= f_select('signin_provider', 'Provider', $si['provider'], $provOpts, $errors, '', 'access.signin.provider') ?></div>
+      <div class="col-md-4"><?= f_text('signin_groups', 'Allowed groups (IDs or roles)', implode(' ', $si['groups']), $errors, 'Empty: everyone the provider accepts', 'text', 'access.signin.groups') ?></div>
+      <div class="col-md-4"><?= f_text('signin_emails', 'Allowed e-mail addresses', implode(' ', $si['emails']), $errors, '', 'text', 'access.signin.emails') ?></div>
+      <div class="col-md-4"><?= f_text('signin_domains', 'Allowed e-mail domains', implode(' ', $si['domains']), $errors, '', 'text', 'access.signin.domains') ?></div>
+    </div>
+    <div class="mb-2"><span class="form-label d-block small">Identity headers to the backend (always set by PSPM; clients cannot send their own)</span>
+      <?php foreach (Signin::HEADERS as $hn => $hl): ?><span class="me-3 d-inline-block"><?= f_check('signin_headers[]', "$hn ($hl)", in_array($hn, $si['headers'], true), '', $hn) ?></span><?php endforeach; ?></div>
+    <?= f_check('signin_pass_token', 'Forward the access token (X-Forwarded-Access-Token)', (bool)$si['pass_token']) ?>
+    <?= f_check('signin_nb401', 'Answer 401 instead of redirecting requests that are not from a browser (APIs)', (bool)$si['nonbrowser_401']) ?>
   </div>
   <div class="col-lg-6">
     <h2 class="h6">TLS</h2>

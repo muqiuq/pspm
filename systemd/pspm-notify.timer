@@ -1,0 +1,11 @@
+[Unit]
+Description=PSPM health checks and e-mail notifications (timer)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=pspm-notify.service
+
+[Install]
+WantedBy=timers.target

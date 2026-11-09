@@ -87,14 +87,15 @@ function norm(string $c): ?array
 // ---------------------------------------------------------------- snapshots
 
 /** @return list<array{0:string,1:int,2:string}> key, expires (0 = never), value */
-function snapshot(string $name): array
+function snapshot(string $name, ?string $file = null, ?array &$meta = null): array
 {
-    $f = STATE . "/$name.tsv";
+    $f = $file ?? STATE . "/$name.tsv";
+    $meta = [];
     if (!is_readable($f)) return [];
     $out = [];
     $now = time();
     foreach (file($f, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $l) {
-        if ($l[0] === '#') continue;
+        if ($l[0] === '#') { if (preg_match('/^#\s*(\S+)\s+(.*)$/', $l, $m)) $meta[$m[1]] = $m[2]; continue; }
         $parts = explode("\t", $l);
         if (count($parts) !== 3 || !ctype_digit($parts[1])) continue;
         $exp = (int)$parts[1];
@@ -277,7 +278,16 @@ function sync(): array
                 $add('pspm-block' . $n[1], $n[0], $exp);
             }
         }
-        // external blocklists (plan §14.5) arrive as state/blocklists/*.tsv in a later version
+        // external blocklists (plan §14.5): "block" → feed set, "observe" → counting-only watch set
+        foreach (glob(STATE . '/blocklists/*.tsv') ?: [] as $f) {
+            $entries = snapshot('', $f, $meta);
+            $set = ($meta['mode'] ?? '') === 'block' ? 'pspm-feed' : 'pspm-watch';
+            foreach ($entries as [$key, $exp]) {
+                $n = norm($key);
+                if (!$n || never_blocked($n[0]) || $n[2] < ($n[1] === 4 ? 8 : 16)) { $dropped++; continue; }
+                $add($set . $n[1], $n[0], $exp);
+            }
+        }
     }
     // web ports for authorised addresses
     $ports = [];

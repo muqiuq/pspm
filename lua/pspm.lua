@@ -3,7 +3,7 @@
 local _M = {}
 
 local DICTS = { cleared = "pspm_cleared", banned = "pspm_banned", blocked = "pspm_blocked",
-                trusted = "pspm_trusted", certs = "pspm_certs" }
+                trusted = "pspm_trusted", certs = "pspm_certs", traps = "pspm_traps", meta = "pspm_cfg" }
 local state_dir = "/var/lib/pspm/state"
 
 local bit = require "bit"
@@ -94,6 +94,7 @@ local function cidr_lookup(name, ip)
 end
 
 function _M.banned(ip) return cidr_lookup("banned", ip) end
+function _M.trusted(ip) return cidr_lookup("trusted", ip) end
 function _M.blocked(ip) return cidr_lookup("blocked", ip) end
 
 function _M.cleared(site, key)
@@ -110,13 +111,62 @@ function _M.cert_ok(site)
     if not fp or fp == "" then return false end
     local v = ngx.shared.pspm_certs:get(fp)
     if v == nil then
-        -- not issued by PSPM: accepted only when strict mode is off for unknown certificates
-        return ngx.shared.pspm_meta:get("certs:strict") ~= "1"
+        -- Not issued by PSPM. With strict mode, a certificate from a CA that PSPM issues
+        -- with is refused; one from a trust-only CA counts (plan §13.3).
+        local meta = ngx.shared.pspm_meta
+        if meta:get("certs:strict") ~= "1" then return true end
+        local issuer = (var.ssl_client_i_dn or ""):match("CN=([^,/]+)")
+        local managed = meta:get("certs:managed") or ""
+        if issuer then
+            for cn in managed:gmatch("[^|]+") do if cn == issuer then return false end end
+        end
+        return true
     end
     if v == "revoked" then return false end
     if v == "all" then return true end
     for s in v:gmatch("[^,]+") do if s == site then return true end end
     return false
+end
+
+-- Block an address in nginx at once (trap hit, unknown-host rule). The scan job records it
+-- within a minute and puts it into the firewall.
+function _M.block_now(ip, why)
+    local len = ip:find(":", 1, true) and 64 or 32
+    local k = net_key(ip, len)
+    if not k then return end
+    ngx.shared.pspm_blocked:set(k, why, 86400)
+    local m = ngx.shared.pspm_meta
+    local fam = len == 64 and "6" or "4"
+    local lens = m:get("blocked:lens" .. fam) or ""
+    if not (("," .. lens .. ","):find("," .. len .. ",", 1, true)) then
+        m:set("blocked:lens" .. fam, lens == "" and tostring(len) or (lens .. "," .. len))
+    end
+end
+
+-- Honeypots: exact paths and prefixes per host (or "*"), cached per worker until the
+-- snapshot serial changes. Returns "state:id" or nil.
+local trap_serial, trap_exact, trap_prefix = nil, {}, {}
+function _M.trap(host, uri)
+    local serial = ngx.shared.pspm_meta:get("traps:serial")
+    if serial ~= trap_serial then
+        trap_exact, trap_prefix = {}, {}
+        local d = ngx.shared.pspm_traps
+        for _, k in ipairs(d:get_keys(0)) do
+            local kind, h, path = k:match("^(%a+)|([^|]+)|(.+)$")
+            local v = d:get(k)
+            if kind == "exact" then trap_exact[h .. "|" .. path] = v
+            elseif kind == "prefix" then trap_prefix[#trap_prefix + 1] = { h, path, v } end
+        end
+        trap_serial = serial
+    end
+    uri = (uri or ""):lower()
+    host = (host or ""):lower()
+    local v = trap_exact[host .. "|" .. uri] or trap_exact["*|" .. uri]
+    if v then return v end
+    for _, p in ipairs(trap_prefix) do
+        if (p[1] == "*" or p[1] == host) and uri:sub(1, #p[2]) == p[2] then return p[3] end
+    end
+    return nil
 end
 
 -- Deny the request the way the site wants it (403 / 404 / close / redirect).
@@ -170,9 +220,9 @@ function _M.load(name)
     local m = ngx.shared.pspm_meta
     m:set(name .. ":serial", meta.serial or "0")
     m:set(name .. ":count", n)
-    if meta.lens4 then m:set(name .. ":lens4", meta.lens4) end
-    if meta.lens6 then m:set(name .. ":lens6", meta.lens6) end
-    if meta.strict then m:set(name .. ":strict", meta.strict) end
+    for k, v in pairs(meta) do
+        if k ~= "serial" and k ~= "generated" and k ~= "pspm" then m:set(name .. ":" .. k, v) end
+    end
     return n, skipped > 0 and (skipped .. " entries did not fit") or nil
 end
 

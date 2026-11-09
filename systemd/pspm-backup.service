@@ -1,0 +1,9 @@
+[Unit]
+Description=PSPM nightly backup (database dump and JSON export)
+After=docker.service
+ConditionPathExists=/opt/pspm/scripts/backup.sh
+
+[Service]
+Type=oneshot
+ExecStart=/opt/pspm/scripts/backup.sh
+Nice=10

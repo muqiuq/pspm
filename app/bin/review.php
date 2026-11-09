@@ -64,6 +64,31 @@ foreach ($nb as $id => $b) {
     elseif ($ob[$id] !== $b) $lines[] = "~ backend {$b['name']}";
 }
 foreach ($ob as $id => $b) if (!isset($nb[$id])) $lines[] = "- backend {$b['name']}";
+$oc = array_column($old['cas'] ?? [], null, 'id'); $nc = array_column($new['cas'] ?? [], null, 'id');
+foreach ($nc as $id => $c) if (!isset($oc[$id])) { $lines[] = "+ trusted CA {$c['name']}"; $opens[] = "nginx trusts a new CA for client certificates: {$c['name']} (SHA-256 " . substr($c['fingerprint_sha256'], 0, 16) . '…)'; }
+foreach ($oc as $id => $c) if (!isset($nc[$id])) $lines[] = "- trusted CA {$c['name']}";
+$op = array_column($old['providers'] ?? [], null, 'id'); $np = array_column($new['providers'] ?? [], null, 'id');
+foreach ($np as $id => $p) {
+    if (!isset($op[$id])) { $lines[] = "+ sign-in provider {$p['name']} ({$p['signin_host']})"; $opens[] = "new sign-in provider {$p['name']}: tenant {$p['tenant_id']}, client {$p['client_id']}"; continue; }
+    $o = $op[$id];
+    if ($o === $p) continue;
+    $lines[] = "~ sign-in provider {$p['name']}";
+    if ($o['tenant_id'] !== $p['tenant_id'] || $o['client_id'] !== $p['client_id']) $opens[] = "sign-in provider {$p['name']} now uses tenant {$p['tenant_id']}, client {$p['client_id']}";
+    if (in_array('*', $p['email_domains'], true) && !in_array('*', $o['email_domains'], true) || array_diff($p['email_domains'], $o['email_domains'])) {
+        $opens[] = "sign-in provider {$p['name']} accepts more e-mail domains: " . implode(', ', $p['email_domains']);
+    }
+}
+foreach ($op as $id => $p) if (!isset($np[$id])) $lines[] = "- sign-in provider {$p['name']}";
+foreach ($ns as $id => $s) {
+    if (!isset($os[$id])) continue;
+    $o = $os[$id]['access']['signin'] ?? ['mode' => 'none', 'groups' => [], 'emails' => [], 'domains' => []];
+    $n = $s['access']['signin'] ?? ['mode' => 'none', 'groups' => [], 'emails' => [], 'domains' => []];
+    if ($o['mode'] !== 'none' && $n['mode'] === 'none') $opens[] = "site {$s['hosts'][0]}: sign-in removed";
+    if ($o['mode'] === 'required' && $n['mode'] === 'alternative') $opens[] = "site {$s['hosts'][0]}: sign-in is now an alternative instead of required";
+    foreach (['groups', 'emails', 'domains'] as $k) {
+        if (($o[$k] ?? []) && (!($n[$k] ?? []) || array_diff($n[$k], $o[$k]))) $opens[] = "site {$s['hosts'][0]}: more users may sign in ($k)";
+    }
+}
 $og = $old['global'] ?? []; $ng = $new['global'] ?? [];
 foreach ($ng as $k => $v) if (($og[$k] ?? null) !== $v) $lines[] = "~ setting $k";
 if (($og['admin_host'] ?? '') !== ($ng['admin_host'] ?? '')) $opens[] = 'admin host name: ' . (($ng['admin_host'] ?? '') ?: '(none: the UI answers by IP to private addresses)');

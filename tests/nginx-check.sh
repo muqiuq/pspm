@@ -10,6 +10,7 @@ mkcert() { mkdir -p "$(dirname "$1")"; openssl req -x509 -newkey rsa:2048 -nodes
 mkcert /etc/letsencrypt/live/pspm-app-example-ch/fullchain.pem /etc/letsencrypt/live/pspm-app-example-ch/privkey.pem app.example.ch
 mkcert /etc/letsencrypt/live/pspm-admin/fullchain.pem /etc/letsencrypt/live/pspm-admin/privkey.pem proxy.example.ch
 mkcert /etc/pspm/tls/ip.crt /etc/pspm/tls/ip.key 192.168.1.10
+mkcert /etc/letsencrypt/live/pspm-signin-peeeeeeee/fullchain.pem /etc/letsencrypt/live/pspm-signin-peeeeeeee/privkey.pem auth.example.ch
 mkdir -p /var/lib/pspm/state /var/www/acme /run/php
 echo "10.0.0.5 app.internal" >> /etc/hosts
 printf '# pspm snapshot blocked\n# serial 1\n# lens4 32\n# lens6 \n203.0.113.7/32\t0\tfw\n' > /var/lib/pspm/state/blocked.tsv

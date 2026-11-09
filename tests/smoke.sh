@@ -21,6 +21,20 @@ php /src/app/bin/revision.php export >/tmp/rev.json
 jq -n --slurpfile r /tmp/rev.json --slurpfile f /src/tests/fixtures/facts.json '{revision: $r[0], facts: $f[0]}' | php /src/app/bin/render.php >/tmp/out.json
 jq -r '.summary | {sites: [.sites[].host], admin, pending_certs}' /tmp/out.json
 php /src/app/bin/state.php || true
+echo "--- PKI"
+php /src/tests/pki-check.php
+echo "--- security"
+php /src/tests/security-check.php
+echo "--- export/import"
+php /src/tests/export-check.php export
+PSPM_DB_DSN='pgsql:host=pspm-pg-test;dbname=pspm2' php /src/app/bin/migrate.php /src/db/migrations >/dev/null
+PSPM_DB_DSN='pgsql:host=pspm-pg-test;dbname=pspm2' php /src/tests/export-check.php import
+cp -r /src/nginx/static /tmp/pki-release/static && cp -r /src/lua /tmp/pki-release/lua
+mkc() { mkdir -p "$(dirname "$1")"; openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=$3" -days 2 -keyout "$2" -out "$1" >/dev/null 2>&1; }
+mkc /etc/letsencrypt/live/pspm-app-example-ch/fullchain.pem /etc/letsencrypt/live/pspm-app-example-ch/privkey.pem app.example.ch
+mkc /etc/letsencrypt/live/pspm-admin/fullchain.pem /etc/letsencrypt/live/pspm-admin/privkey.pem proxy.example.ch
+mkc /etc/pspm/tls/ip.crt /etc/pspm/tls/ip.key 127.0.0.1
+mkdir -p /var/lib/pspm/state /var/www/acme && nginx -t -q -p /tmp/pki-release/ -c nginx.conf && echo "ok   nginx -t with the client CA bundle"
 ls -la "$PSPM_VAR/state"
 php /src/app/bin/user.php list
 php /src/app/bin/user.php reset-otp admin

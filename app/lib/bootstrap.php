@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 const PSPM_APP = __DIR__ . '/..';
-const PSPM_SCHEMA = 1;   // the newest migration this code needs (db/migrations/NNNN_*.sql)
+const PSPM_SCHEMA = 2;   // the newest migration this code needs (db/migrations/NNNN_*.sql)
 
 // Paths can be moved for tests with environment variables; production uses the defaults.
 define('PSPM_ETC',   rtrim(getenv('PSPM_ETC') ?: '/etc/pspm', '/'));
@@ -15,7 +15,8 @@ define('PSPM_NGINX', PSPM_ETC . '/nginx');
 
 foreach (['util', 'db', 'crypto', 'ip', 'audit', 'settings', 'totp', 'auth', 'validate',
           'model', 'revisions', 'render', 'diff', 'live', 'status', 'state', 'access',
-          'layout', 'markdown'] as $lib) {
+          'layout', 'markdown', 'pki', 'signin', 'ai', 'notify', 'blocks', 'secscan', 'traps', 'behaviour',
+          'blocklists', 'export'] as $lib) {
     require_once __DIR__ . "/$lib.php";
 }
 

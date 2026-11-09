@@ -17,6 +17,16 @@ if (is_post()) {
             flash('Password changed. Your other sessions were ended.');
             redirect('/account');
         }
+    } elseif (post('action') === 'notify') {
+        $email = trim((string)post('email'));
+        if ($email !== '' && !Validate::email($email)) $errors['email'] = 'Not an e-mail address.';
+        else {
+            $cats = array_values(array_intersect(array_keys(Notify::CATEGORIES), (array)post('cats', [])));
+            DB::q('UPDATE users SET email = ?, notify = ?::jsonb, updated_at = now() WHERE id = ?', [$email ?: null, json_enc($cats ?: ['none']), $u['id']]);
+            Audit::log('user.notify', 'user:' . $u['username'], ['categories' => $cats]);
+            flash('Notification settings saved.');
+            redirect('/account');
+        }
     } elseif (post('action') === 'end_others') {
         DB::q('DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?', [$u['id'], Auth::session()['id_hash']]);
         flash('Your other sessions were ended.');
@@ -35,6 +45,12 @@ page_start('Account');
       <?= f_text('password', 'New password', '', $errors, 'At least 12 characters.', 'password', '', ['autocomplete' => 'new-password']) ?>
       <?= f_text('password2', 'Repeat', '', $errors, '', 'password', '', ['autocomplete' => 'new-password']) ?>
       <button class="btn btn-primary btn-sm">Change</button></form>
+    <h2 class="h6 mt-4">E-mail notifications</h2>
+    <form method="post"><?= csrf_field() ?><input type="hidden" name="action" value="notify">
+      <?= f_text('email', 'Your e-mail address', $u['email'] ?? '', $errors, '', 'email') ?>
+      <?php $mine = Notify::userCategories($u); foreach (Notify::CATEGORIES as $k => $l): ?><?= f_check('cats[]', $l, in_array($k, $mine, true), '', $k) ?><?php endforeach; ?>
+      <button class="btn btn-primary btn-sm">Save</button>
+      <?php if (!Notify::configured()): ?><span class="small text-muted">No SMTP relay is set yet (Settings).</span><?php endif; ?></form>
     <p class="small text-muted mt-3">A lost authenticator is reset on the server: <code>sudo /opt/pspm/scripts/reset-otp.sh <?= h($u['username']) ?></code></p>
   </div>
   <div class="col-lg-7">

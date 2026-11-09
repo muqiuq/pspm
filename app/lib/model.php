@@ -132,7 +132,8 @@ final class Model
         foreach (self::backends() as $id => $b) { unset($b['updated_at']); $backends[] = $b; }
         usort($sites, fn($a, $b) => strcmp($a['id'], $b['id']));
         usort($backends, fn($a, $b) => strcmp($a['id'], $b['id']));
-        return ['format' => 1, 'global' => Settings::global(), 'sites' => $sites, 'backends' => $backends];
+        return ['format' => 1, 'global' => Settings::global(), 'sites' => $sites, 'backends' => $backends,
+            'cas' => PKI::trustedForRevision(), 'providers' => Signin::forRevision()];
     }
 
     /**
@@ -152,7 +153,22 @@ final class Model
             foreach ($be as $k => $v) $errors[] = "Backend {$b['name']} → $k: $v";
             $backendIds[] = $b['id'];
         }
+        foreach ((array)($doc['cas'] ?? []) as $ca) {
+            $info = is_string($ca['cert_pem'] ?? null) ? PKI::info($ca['cert_pem']) : null;
+            if (!Validate::uuid($ca['id'] ?? null) || !$info) { $errors[] = 'A trusted CA is not a valid certificate.'; continue; }
+            if (!$info['is_ca'] || !$info['self_signed']) $errors[] = "CA {$ca['name']} is not a self-signed CA certificate.";
+            if (PKI::fingerprint($ca['cert_pem']) !== ($ca['fingerprint_sha256'] ?? '')) $errors[] = "CA {$ca['name']}: the fingerprint does not match.";
+        }
+        $providers = [];
         $hostSeen = [];
+        foreach ((array)($doc['providers'] ?? []) as $p) {
+            [, $pe] = Signin::validate($p);
+            foreach ($pe as $k => $v) $errors[] = 'Sign-in provider ' . ($p['name'] ?? '?') . " → $k: $v";
+            if (!Validate::uuid($p['id'] ?? null) || empty($p['port'])) $errors[] = 'A sign-in provider has no valid id or port.';
+            else $providers[$p['id']] = $p;
+            $hostSeen[$p['signin_host'] ?? ''] = true;
+        }
+        $hostSeen = array_filter($hostSeen, fn($k) => $k !== '', ARRAY_FILTER_USE_KEY);
         $portTls = [];
         $admin = $doc['global']['admin_host'] ?? '';
         foreach ((array)($doc['sites'] ?? []) as $s) {
@@ -160,8 +176,18 @@ final class Model
             if (!Validate::uuid($s['id'] ?? null)) { $errors[] = "Site $name has no valid id."; continue; }
             [, $se] = Validate::site($s, $backendIds);
             foreach ($se as $k => $v) $errors[] = "Site $name → $k: $v";
+            $si = $s['access']['signin'] ?? ['mode' => 'none'];
+            $usesSignin = ($si['mode'] ?? 'none') !== 'none';
+            foreach ((array)($s['routes'] ?? []) as $r) $usesSignin = $usesSignin || ($r['overrides']['access']['signin'] ?? 'none') !== 'none';
+            if ($usesSignin) {
+                $p = $providers[$si['provider'] ?? ''] ?? null;
+                if (!$p) $errors[] = "Site $name: its sign-in provider does not exist.";
+                else foreach ((array)$s['hosts'] as $h) {
+                    if (!Signin::under($h, $p['cookie_domain'])) $errors[] = "Site $name: $h is outside the cookie domain {$p['cookie_domain']} of provider {$p['name']}.";
+                }
+            }
             foreach ((array)($s['hosts'] ?? []) as $h) {
-                if (isset($hostSeen[$h])) $errors[] = "Host $h is in two sites.";
+                if (isset($hostSeen[$h])) $errors[] = "Host $h is in two sites (or is a sign-in host).";
                 if ($h === $admin) $errors[] = "Host $h is the admin host name.";
                 $hostSeen[$h] = true;
             }

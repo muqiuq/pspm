@@ -8,7 +8,7 @@ declare(strict_types=1);
  */
 final class State
 {
-    public const NAMES = ['cleared', 'banned', 'blocked', 'trusted', 'certs'];
+    public const NAMES = ['cleared', 'banned', 'blocked', 'trusted', 'certs', 'traps', 'meta'];
 
     /** Rebuild the named snapshots (all when none given), write them atomically, tell nginx. */
     public static function publish(string ...$names): array
@@ -56,23 +56,41 @@ final class State
                 break;
             case 'trusted':
                 foreach (DB::all('SELECT ip::text AS cidr, kind, expires_at FROM trusted_ips WHERE expires_at IS NULL OR expires_at > now()') as $r) {
-                    [$key] = self::cidrKey($r['cidr']);
+                    [$key, $fam, $len] = self::cidrKey($r['cidr']);
+                    $lens[$fam][$len] = true;
                     $add($key, $r['expires_at'], $r['kind']);
                 }
                 break;
             case 'certs':
-                if (DB::val("SELECT to_regclass('client_certs')")) {
-                    foreach (DB::all('SELECT fingerprint_sha1, revoked_at, scope FROM client_certs') as $r) {
-                        $add($r['fingerprint_sha1'], null, $r['revoked_at'] ? 'revoked' : ($r['scope'] ?: 'all'));
-                    }
+                foreach (DB::all('SELECT fingerprint_sha1, revoked_at, scope, not_after FROM client_certs') as $r) {
+                    $add($r['fingerprint_sha1'], $r['revoked_at'] ? null : $r['not_after'], $r['revoked_at'] ? 'revoked' : ($r['scope'] ?: 'all'));
                 }
+                break;
+            case 'traps':
+                if (Traps::enabled()) foreach (DB::all("SELECT id, host, kind, path, state FROM traps WHERE state IN ('active', 'shadow')") as $r) {
+                    $add("{$r['kind']}|{$r['host']}|{$r['path']}", null, "{$r['state']}:{$r['id']}");
+                }
+                break;
+            case 'meta':
+                // runtime settings the Lua code needs (plan §15.5, §15.6)
+                $u = Settings::get('unknown_hosts', []);
+                $add('unknown_threshold', null, (string)(int)($u['threshold'] ?? 5));
+                $add('unknown_window', null, (string)(int)($u['window'] ?? 3600));
+                $add('traps_enabled', null, Traps::enabled() ? '1' : '0');
+                // firewall enforcement for the agent (plan §14.7)
+                write_atomic(PSPM_STATE . '/firewall.conf', 'enforce=' . (Settings::get('firewall_enforcement') ? '1' : '0') . "\n", 0644);
                 break;
             default:
                 throw new InvalidArgumentException("unknown snapshot $name");
         }
         sort($lines);
         $meta = [];
-        if (in_array($name, ['banned', 'blocked'], true)) {
+        if ($name === 'certs') {
+            // Strict mode (plan §13.3): a certificate from a CA PSPM can issue with counts only if PSPM issued it.
+            $meta['strict'] = (Settings::get('pki', [])['strict'] ?? true) ? '1' : '0';
+            $meta['managed'] = implode('|', array_column(DB::all('SELECT subject_cn FROM cas WHERE key_wrapped IS NOT NULL ORDER BY 1'), 'subject_cn'));
+        }
+        if (in_array($name, ['banned', 'blocked', 'trusted'], true)) {
             foreach ([4, 6] as $f) { $l = array_keys($lens[$f]); rsort($l); $meta["lens$f"] = implode(',', $l); }
         }
         return [$lines, $meta];

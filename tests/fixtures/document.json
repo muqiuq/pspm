@@ -1,67 +1,561 @@
 {
-  "format": 1,
-  "global": {"admin_host": "proxy.example.ch", "admin_access": ["lan", "cert"], "acme_email": "", "lan_ranges": ["10.0.0.0/8", "192.168.0.0/16", "fc00::/7"],
-             "tls_profile": "intermediate", "security_headers": true, "error_pages": true,
-             "hsts": {"enabled": true, "max_age": 31536000, "include_subdomains": true},
-             "rate_standard": {"rate": 100, "burst": 200}, "rate_strict": {"rate": 10, "burst": 20}},
-  "backends": [
-    {"id": "11111111-1111-4111-8111-111111111111", "name": "app", "protocol": "http", "tls_verify": "off", "tls_name": "", "custom_ca": "", "keepalive": 16,
-     "servers": [{"addr": "app.internal:8080", "weight": 1, "backup": false, "max_fails": 1, "fail_timeout": 10},
-                 {"addr": "10.0.0.6:8080", "weight": 2, "backup": true, "max_fails": 3, "fail_timeout": 30}]},
-    {"id": "22222222-2222-4222-8222-222222222222", "name": "secure", "protocol": "https", "tls_verify": "system", "tls_name": "secure.internal", "custom_ca": "", "keepalive": 0,
-     "servers": [{"addr": "[2001:db8::20]:443", "weight": 1, "backup": false, "max_fails": 1, "fail_timeout": 10},
-                 {"addr": "gone.internal:443", "weight": 1, "backup": false, "max_fails": 1, "fail_timeout": 10}]}
+ "format": 1,
+ "global": {
+  "admin_host": "proxy.example.ch",
+  "admin_access": [
+   "lan",
+   "cert"
   ],
-  "sites": [
-    {"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "enabled": true, "description": "Main app", "hosts": ["app.example.ch", "www.app.example.ch"],
-     "tls": {"mode": "letsencrypt", "profile": "default", "http2": true, "hsts": {"mode": "default", "max_age": 31536000, "include_subdomains": true, "preload": false}},
-     "port80": "redirect", "client_certs": "optional",
-     "access": {"conditions": ["lan", "cleared", "cert"], "denied": "404", "denied_url": ""},
-     "limits": {"max_body": "100m", "rate": "standard", "limit_conn": 50},
-     "proxy": {"backend": "11111111-1111-4111-8111-111111111111", "host_header": "client", "host_fixed": "", "connect_timeout": 10, "read_timeout": 60, "send_timeout": 60,
-               "websocket": true, "request_buffering": false, "response_buffering": true},
-     "headers": {"request": [{"name": "X-Client-IP", "type": "client_addr", "value": ""}, {"name": "X-Env", "type": "text", "value": "prod"}],
-                 "response": [{"name": "X-Frame-Options", "value": "SAMEORIGIN"}], "hide": ["Server"], "security": "default"},
-     "listeners": [{"port": 8443, "tls": true}, {"port": 8080, "tls": false}],
-     "routes": [
-       {"id": "r1", "match": "prefix", "paths": ["/"], "listeners": ["all"], "action": "proxy", "status": 404, "redirect_url": "", "redirect_code": 302, "overrides": {}},
-       {"id": "r2", "match": "prefix", "paths": ["/public/", "/assets/"], "listeners": ["https"], "action": "proxy", "status": 404, "redirect_url": "", "redirect_code": 302,
-        "overrides": {"access": {"conditions": ["public"]}, "max_body": "1m", "read_timeout": 300}},
-       {"id": "r3", "match": "exact", "paths": ["/health"], "listeners": ["http", "https"], "action": "status", "status": 204, "redirect_url": "", "redirect_code": 302, "overrides": {}},
-       {"id": "r4", "match": "prefix", "paths": ["/old/"], "listeners": ["all"], "action": "redirect", "status": 404, "redirect_url": "https://www.example.ch/new/", "redirect_code": 301, "overrides": {}},
-       {"id": "r5", "match": "prefix", "paths": ["/device/"], "listeners": ["port:8080"], "action": "proxy", "status": 404, "redirect_url": "", "redirect_code": 302,
-        "overrides": {"backend": "22222222-2222-4222-8222-222222222222", "access": {"conditions": ["lan"]}}}
-     ]},
-    {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "enabled": true, "description": "", "hosts": ["new.example.ch"],
-     "tls": {"mode": "letsencrypt", "profile": "modern", "http2": true, "hsts": {"mode": "off", "max_age": 0, "include_subdomains": false, "preload": false}},
-     "port80": "serve", "client_certs": "off",
-     "access": {"conditions": ["public"], "denied": "403", "denied_url": ""},
-     "limits": {"max_body": "0", "rate": "strict", "limit_conn": 0},
-     "proxy": {"backend": "22222222-2222-4222-8222-222222222222", "host_header": "fixed", "host_fixed": "secure.internal", "connect_timeout": 5, "read_timeout": 30, "send_timeout": 30,
-               "websocket": false, "request_buffering": true, "response_buffering": true},
-     "headers": {"request": [], "response": [], "hide": [], "security": "off"},
-     "listeners": [],
-     "routes": [{"id": "r1", "match": "prefix", "paths": ["/"], "listeners": ["all"], "action": "proxy", "status": 404, "redirect_url": "", "redirect_code": 302, "overrides": {}},
-                {"id": "r2", "match": "prefix", "paths": ["/.well-known/acme-challenge/"], "listeners": ["http"], "action": "acme_proxy", "status": 404, "redirect_url": "", "redirect_code": 302, "overrides": {}}]},
-    {"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "enabled": true, "description": "LAN printer", "hosts": ["printer.example.ch"],
-     "tls": {"mode": "none", "profile": "default", "http2": false, "hsts": {"mode": "default", "max_age": 31536000, "include_subdomains": true, "preload": false}},
-     "port80": "serve", "client_certs": "off",
-     "access": {"conditions": ["lan", "cleared"], "denied": "redirect", "denied_url": "https://www.example.ch/"},
-     "limits": {"max_body": "10m", "rate": "off", "limit_conn": 0},
-     "proxy": {"backend": "11111111-1111-4111-8111-111111111111", "host_header": "client", "host_fixed": "", "connect_timeout": 10, "read_timeout": 60, "send_timeout": 60,
-               "websocket": false, "request_buffering": true, "response_buffering": true},
-     "headers": {"request": [], "response": [], "hide": [], "security": "default"},
-     "listeners": [],
-     "routes": [{"id": "r1", "match": "prefix", "paths": ["/"], "listeners": ["all"], "action": "proxy", "status": 404, "redirect_url": "", "redirect_code": 302, "overrides": {}}]},
-    {"id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "enabled": false, "description": "off", "hosts": ["off.example.ch"],
-     "tls": {"mode": "letsencrypt", "profile": "default", "http2": true, "hsts": {"mode": "default", "max_age": 31536000, "include_subdomains": true, "preload": false}},
-     "port80": "redirect", "client_certs": "optional",
-     "access": {"conditions": ["cert"], "denied": "close", "denied_url": ""},
-     "limits": {"max_body": "10m", "rate": "standard", "limit_conn": 0},
-     "proxy": {"backend": "11111111-1111-4111-8111-111111111111", "host_header": "client", "host_fixed": "", "connect_timeout": 10, "read_timeout": 60, "send_timeout": 60,
-               "websocket": true, "request_buffering": true, "response_buffering": true},
-     "headers": {"request": [], "response": [], "hide": [], "security": "default"},
-     "listeners": [],
-     "routes": [{"id": "r1", "match": "prefix", "paths": ["/"], "listeners": ["all"], "action": "proxy", "status": 404, "redirect_url": "", "redirect_code": 302, "overrides": {}}]}
-  ]
+  "acme_email": "",
+  "lan_ranges": [
+   "10.0.0.0/8",
+   "192.168.0.0/16",
+   "fc00::/7"
+  ],
+  "tls_profile": "intermediate",
+  "security_headers": true,
+  "error_pages": true,
+  "hsts": {
+   "enabled": true,
+   "max_age": 31536000,
+   "include_subdomains": true
+  },
+  "rate_standard": {
+   "rate": 100,
+   "burst": 200
+  },
+  "rate_strict": {
+   "rate": 10,
+   "burst": 20
+  }
+ },
+ "backends": [
+  {
+   "id": "11111111-1111-4111-8111-111111111111",
+   "name": "app",
+   "protocol": "http",
+   "tls_verify": "off",
+   "tls_name": "",
+   "custom_ca": "",
+   "keepalive": 16,
+   "servers": [
+    {
+     "addr": "app.internal:8080",
+     "weight": 1,
+     "backup": false,
+     "max_fails": 1,
+     "fail_timeout": 10
+    },
+    {
+     "addr": "10.0.0.6:8080",
+     "weight": 2,
+     "backup": true,
+     "max_fails": 3,
+     "fail_timeout": 30
+    }
+   ]
+  },
+  {
+   "id": "22222222-2222-4222-8222-222222222222",
+   "name": "secure",
+   "protocol": "https",
+   "tls_verify": "system",
+   "tls_name": "secure.internal",
+   "custom_ca": "",
+   "keepalive": 0,
+   "servers": [
+    {
+     "addr": "[2001:db8::20]:443",
+     "weight": 1,
+     "backup": false,
+     "max_fails": 1,
+     "fail_timeout": 10
+    },
+    {
+     "addr": "gone.internal:443",
+     "weight": 1,
+     "backup": false,
+     "max_fails": 1,
+     "fail_timeout": 10
+    }
+   ]
+  }
+ ],
+ "sites": [
+  {
+   "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+   "enabled": true,
+   "description": "Main app",
+   "hosts": [
+    "app.example.ch",
+    "www.app.example.ch"
+   ],
+   "tls": {
+    "mode": "letsencrypt",
+    "profile": "default",
+    "http2": true,
+    "hsts": {
+     "mode": "default",
+     "max_age": 31536000,
+     "include_subdomains": true,
+     "preload": false
+    }
+   },
+   "port80": "redirect",
+   "client_certs": "optional",
+   "access": {
+    "conditions": [
+     "lan",
+     "cleared",
+     "cert"
+    ],
+    "denied": "404",
+    "denied_url": "",
+    "signin": {
+     "mode": "alternative",
+     "provider": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+     "groups": [
+      "aaaa1111-2222-3333-4444-555566667777"
+     ],
+     "emails": [],
+     "domains": [],
+     "headers": [
+      "X-Forwarded-User",
+      "X-Forwarded-Email",
+      "X-Remote-User"
+     ],
+     "pass_token": false,
+     "nonbrowser_401": true
+    }
+   },
+   "limits": {
+    "max_body": "100m",
+    "rate": "standard",
+    "limit_conn": 50
+   },
+   "proxy": {
+    "backend": "11111111-1111-4111-8111-111111111111",
+    "host_header": "client",
+    "host_fixed": "",
+    "connect_timeout": 10,
+    "read_timeout": 60,
+    "send_timeout": 60,
+    "websocket": true,
+    "request_buffering": false,
+    "response_buffering": true
+   },
+   "headers": {
+    "request": [
+     {
+      "name": "X-Client-IP",
+      "type": "client_addr",
+      "value": ""
+     },
+     {
+      "name": "X-Env",
+      "type": "text",
+      "value": "prod"
+     }
+    ],
+    "response": [
+     {
+      "name": "X-Frame-Options",
+      "value": "SAMEORIGIN"
+     }
+    ],
+    "hide": [
+     "Server"
+    ],
+    "security": "default"
+   },
+   "listeners": [
+    {
+     "port": 8443,
+     "tls": true
+    },
+    {
+     "port": 8080,
+     "tls": false
+    }
+   ],
+   "routes": [
+    {
+     "id": "r1",
+     "match": "prefix",
+     "paths": [
+      "/"
+     ],
+     "listeners": [
+      "all"
+     ],
+     "action": "proxy",
+     "status": 404,
+     "redirect_url": "",
+     "redirect_code": 302,
+     "overrides": {}
+    },
+    {
+     "id": "r2",
+     "match": "prefix",
+     "paths": [
+      "/public/",
+      "/assets/"
+     ],
+     "listeners": [
+      "https"
+     ],
+     "action": "proxy",
+     "status": 404,
+     "redirect_url": "",
+     "redirect_code": 302,
+     "overrides": {
+      "access": {
+       "conditions": [
+        "public"
+       ]
+      },
+      "max_body": "1m",
+      "read_timeout": 300
+     }
+    },
+    {
+     "id": "r3",
+     "match": "exact",
+     "paths": [
+      "/health"
+     ],
+     "listeners": [
+      "http",
+      "https"
+     ],
+     "action": "status",
+     "status": 204,
+     "redirect_url": "",
+     "redirect_code": 302,
+     "overrides": {}
+    },
+    {
+     "id": "r4",
+     "match": "prefix",
+     "paths": [
+      "/old/"
+     ],
+     "listeners": [
+      "all"
+     ],
+     "action": "redirect",
+     "status": 404,
+     "redirect_url": "https://www.example.ch/new/",
+     "redirect_code": 301,
+     "overrides": {}
+    },
+    {
+     "id": "r5",
+     "match": "prefix",
+     "paths": [
+      "/device/"
+     ],
+     "listeners": [
+      "port:8080"
+     ],
+     "action": "proxy",
+     "status": 404,
+     "redirect_url": "",
+     "redirect_code": 302,
+     "overrides": {
+      "backend": "22222222-2222-4222-8222-222222222222",
+      "access": {
+       "conditions": [
+        "lan"
+       ],
+       "signin": "none"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+   "enabled": true,
+   "description": "",
+   "hosts": [
+    "new.example.ch"
+   ],
+   "tls": {
+    "mode": "letsencrypt",
+    "profile": "modern",
+    "http2": true,
+    "hsts": {
+     "mode": "off",
+     "max_age": 0,
+     "include_subdomains": false,
+     "preload": false
+    }
+   },
+   "port80": "serve",
+   "client_certs": "off",
+   "access": {
+    "conditions": [
+     "public"
+    ],
+    "denied": "403",
+    "denied_url": "",
+    "signin": {
+     "mode": "none",
+     "provider": "",
+     "groups": [],
+     "emails": [],
+     "domains": [],
+     "headers": [
+      "X-Forwarded-User",
+      "X-Forwarded-Email",
+      "X-Remote-User"
+     ],
+     "pass_token": false,
+     "nonbrowser_401": true
+    }
+   },
+   "limits": {
+    "max_body": "0",
+    "rate": "strict",
+    "limit_conn": 0
+   },
+   "proxy": {
+    "backend": "22222222-2222-4222-8222-222222222222",
+    "host_header": "fixed",
+    "host_fixed": "secure.internal",
+    "connect_timeout": 5,
+    "read_timeout": 30,
+    "send_timeout": 30,
+    "websocket": false,
+    "request_buffering": true,
+    "response_buffering": true
+   },
+   "headers": {
+    "request": [],
+    "response": [],
+    "hide": [],
+    "security": "off"
+   },
+   "listeners": [],
+   "routes": [
+    {
+     "id": "r1",
+     "match": "prefix",
+     "paths": [
+      "/"
+     ],
+     "listeners": [
+      "all"
+     ],
+     "action": "proxy",
+     "status": 404,
+     "redirect_url": "",
+     "redirect_code": 302,
+     "overrides": {}
+    },
+    {
+     "id": "r2",
+     "match": "prefix",
+     "paths": [
+      "/.well-known/acme-challenge/"
+     ],
+     "listeners": [
+      "http"
+     ],
+     "action": "acme_proxy",
+     "status": 404,
+     "redirect_url": "",
+     "redirect_code": 302,
+     "overrides": {}
+    }
+   ]
+  },
+  {
+   "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+   "enabled": true,
+   "description": "LAN printer",
+   "hosts": [
+    "printer.example.ch"
+   ],
+   "tls": {
+    "mode": "none",
+    "profile": "default",
+    "http2": false,
+    "hsts": {
+     "mode": "default",
+     "max_age": 31536000,
+     "include_subdomains": true,
+     "preload": false
+    }
+   },
+   "port80": "serve",
+   "client_certs": "off",
+   "access": {
+    "conditions": [
+     "lan",
+     "cleared"
+    ],
+    "denied": "redirect",
+    "denied_url": "https://www.example.ch/",
+    "signin": {
+     "mode": "none",
+     "provider": "",
+     "groups": [],
+     "emails": [],
+     "domains": [],
+     "headers": [
+      "X-Forwarded-User",
+      "X-Forwarded-Email",
+      "X-Remote-User"
+     ],
+     "pass_token": false,
+     "nonbrowser_401": true
+    }
+   },
+   "limits": {
+    "max_body": "10m",
+    "rate": "off",
+    "limit_conn": 0
+   },
+   "proxy": {
+    "backend": "11111111-1111-4111-8111-111111111111",
+    "host_header": "client",
+    "host_fixed": "",
+    "connect_timeout": 10,
+    "read_timeout": 60,
+    "send_timeout": 60,
+    "websocket": false,
+    "request_buffering": true,
+    "response_buffering": true
+   },
+   "headers": {
+    "request": [],
+    "response": [],
+    "hide": [],
+    "security": "default"
+   },
+   "listeners": [],
+   "routes": [
+    {
+     "id": "r1",
+     "match": "prefix",
+     "paths": [
+      "/"
+     ],
+     "listeners": [
+      "all"
+     ],
+     "action": "proxy",
+     "status": 404,
+     "redirect_url": "",
+     "redirect_code": 302,
+     "overrides": {}
+    }
+   ]
+  },
+  {
+   "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+   "enabled": false,
+   "description": "off",
+   "hosts": [
+    "off.example.ch"
+   ],
+   "tls": {
+    "mode": "letsencrypt",
+    "profile": "default",
+    "http2": true,
+    "hsts": {
+     "mode": "default",
+     "max_age": 31536000,
+     "include_subdomains": true,
+     "preload": false
+    }
+   },
+   "port80": "redirect",
+   "client_certs": "optional",
+   "access": {
+    "conditions": [
+     "cert"
+    ],
+    "denied": "close",
+    "denied_url": "",
+    "signin": {
+     "mode": "none",
+     "provider": "",
+     "groups": [],
+     "emails": [],
+     "domains": [],
+     "headers": [
+      "X-Forwarded-User",
+      "X-Forwarded-Email",
+      "X-Remote-User"
+     ],
+     "pass_token": false,
+     "nonbrowser_401": true
+    }
+   },
+   "limits": {
+    "max_body": "10m",
+    "rate": "standard",
+    "limit_conn": 0
+   },
+   "proxy": {
+    "backend": "11111111-1111-4111-8111-111111111111",
+    "host_header": "client",
+    "host_fixed": "",
+    "connect_timeout": 10,
+    "read_timeout": 60,
+    "send_timeout": 60,
+    "websocket": true,
+    "request_buffering": true,
+    "response_buffering": true
+   },
+   "headers": {
+    "request": [],
+    "response": [],
+    "hide": [],
+    "security": "default"
+   },
+   "listeners": [],
+   "routes": [
+    {
+     "id": "r1",
+     "match": "prefix",
+     "paths": [
+      "/"
+     ],
+     "listeners": [
+      "all"
+     ],
+     "action": "proxy",
+     "status": 404,
+     "redirect_url": "",
+     "redirect_code": 302,
+     "overrides": {}
+    }
+   ]
+  }
+ ],
+ "providers": [
+  {
+   "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+   "name": "Example staff",
+   "type": "entra",
+   "tenant_id": "11111111-2222-3333-4444-555555555555",
+   "client_id": "66666666-7777-8888-9999-000000000000",
+   "signin_host": "auth.example.ch",
+   "cookie_domain": "example.ch",
+   "email_domains": [
+    "example.ch"
+   ],
+   "groups_claim": "groups",
+   "email_claim": "email",
+   "session_hours": 24,
+   "recheck_minutes": 60,
+   "start_url": "https://www.example.ch/",
+   "port": 4181
+  }
+ ],
+ "cas": []
 }

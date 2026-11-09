@@ -8,9 +8,13 @@ const NAV = [
     ['/sites', 'Sites', 'viewer'],
     ['/backends', 'Backends', 'viewer'],
     ['/access', 'Access', 'viewer'],
+    ['/certificates', 'Certificates', 'viewer'],
+    ['/signin', 'Sign-in', 'admin'],
+    ['/security', 'Security', 'viewer'],
     ['/changes', 'Changes', 'viewer'],
     ['/settings', 'Settings', 'admin'],
     ['/users', 'Users', 'admin'],
+    ['/backup', 'Backup', 'admin'],
     ['/activity', 'Activity', 'viewer'],
     ['/help', 'Help', 'viewer'],
 ];

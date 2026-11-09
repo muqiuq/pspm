@@ -82,7 +82,7 @@ apply_configuration() {
     # Root writes only whitelisted relative paths.
     local p n=0
     while IFS= read -r p; do
-        if [[ ! $p =~ ^(nginx\.conf|(conf|sites|ca)/[A-Za-z0-9][A-Za-z0-9._-]*)$ ]]; then
+        if [[ ! $p =~ ^(nginx\.conf|(conf|sites|ca|oauth2-proxy)/[A-Za-z0-9][A-Za-z0-9._-]*)$ ]]; then
             APPLY_RESULT="the renderer produced a path that is not allowed: $p"; error "$APPLY_RESULT"; rm -rf "$rel_dir" "$work"; return 1
         fi
         install -d -m 0755 "$rel_dir/$(dirname "$p")"
@@ -146,7 +146,21 @@ apply_configuration() {
             APPLY_RESULT="Lua syntax error in $(basename "$lf")"; error "$APPLY_RESULT"; rm -rf "$rel_dir"; return 1
         fi
     done
-    ok "nginx -t and the Lua syntax check pass"
+    # CA bundle: every entry CA:TRUE, self-signed, not expired, fingerprint as in the revision.
+    local caf caid want have
+    for caf in "$rel_dir"/ca/client-*.pem; do
+        [[ -f $caf ]] || continue
+        caid=$(basename "$caf" .pem); caid=${caid#client-}
+        want=$(jq -r --arg id "$caid" '.document.cas[]? | select(.id == $id) | .fingerprint_sha256' "$rel_dir/revision.json")
+        have=$(openssl x509 -in "$caf" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d : | tr 'A-F' 'a-f')
+        if ! openssl x509 -in "$caf" -noout -ext basicConstraints 2>/dev/null | grep -q 'CA:TRUE' \
+            || ! openssl verify -no-CApath -no-CAfile -CAfile "$caf" "$caf" >/dev/null 2>&1 \
+            || ! openssl x509 -in "$caf" -noout -checkend 0 >/dev/null 2>&1 || [[ -z $want || $want != "$have" ]]; then
+            record_apply "$rev_id" "$rel" "$manifest_sha" failed "CA bundle check failed for $caid" "$started"
+            APPLY_RESULT="the client-certificate CA $caid fails the bundle checks (CA:TRUE, self-signed, valid, fingerprint)"; error "$APPLY_RESULT"; rm -rf "$rel_dir"; return 1
+        fi
+    done
+    ok "nginx -t, the Lua syntax check and the CA bundle checks pass"
 
     # 5.–7. Journal, switch, reload.
     printf 'rel=%s\nprevious=%s\nstate=switching\nstarted=%s\nuser=%s\n' "$rel" "$prev" "$started" "${SUDO_USER:-root}" >"$JOURNAL"
@@ -154,6 +168,7 @@ apply_configuration() {
     local errlog_size
     errlog_size=$(stat -c %s /var/log/nginx/error.log 2>/dev/null || echo 0)
     switch_current "$rel"
+    apply_signin "$rel_dir"
     if ! reload_nginx; then
         rollback_to "$prev" "$rel" "nginx did not reload"
         trap - HUP INT
@@ -170,6 +185,7 @@ apply_configuration() {
         APPLY_RESULT="$why"; return 2
     fi
     trap - HUP INT
+    verify_signin "$rel_dir"
 
     # 10. Record.
     sed -i 's/^state=.*/state=done/' "$JOURNAL"
@@ -182,6 +198,77 @@ apply_configuration() {
     prune_releases
     APPLY_RESULT="revision $rev_id is live as $rel"
     ok "Revision $rev_id is live"
+    return 0
+}
+
+# Sign-in containers (plan §12.2): configs from the release, secrets root-only, one Redis.
+# Problems here are warnings, never a rollback: sites that require sign-in fail closed.
+apply_signin() {
+    local rel_dir=$1 dir=$ETC/oauth2-proxy sum n i id slug env pw changed=()
+    sum=$rel_dir/summary.json
+    n=$(jq '.providers | length' "$sum" 2>/dev/null || echo 0)
+    if [[ $n == 0 ]]; then
+        if [[ -f $dir/compose.yml ]]; then
+            run "sign-in containers down" compose -p pspm-signin -f "$dir/compose.yml" down --remove-orphans || warn "Could not stop the sign-in containers."
+            rm -f "$dir/compose.yml"
+        fi
+        return 0
+    fi
+    install -d -m 0755 "$dir" "$VAR/redis"
+    if [[ ! -f $dir/redis.env ]]; then (umask 077; printf 'REDISCLI_AUTH=%s\n' "$(openssl rand -hex 24)" >"$dir/redis.env"); fi
+    pw=$(sed -n 's/^REDISCLI_AUTH=//p' "$dir/redis.env")
+    if write_if_changed "$dir/redis.conf" 0400 "# PSPM: Redis for the sign-in sessions (written by install.sh)
+bind 127.0.0.1 -::1
+port 6379
+protected-mode yes
+requirepass $pw
+dir /data"; then changed+=(redis); fi
+    chown 999:999 "$dir/redis.conf"
+    for ((i = 0; i < n; i++)); do
+        id=$(jq -r ".providers[$i].id" "$sum"); slug=$(jq -r ".providers[$i].slug" "$sum")
+        install -d -m 0755 "$dir/$slug"
+        if ! cmp -s "$rel_dir/oauth2-proxy/$slug.cfg" "$dir/$slug/oauth2-proxy.cfg"; then
+            install -m 0644 "$rel_dir/oauth2-proxy/$slug.cfg" "$dir/$slug/oauth2-proxy.cfg"; changed+=("oauth-$slug")
+        fi
+        if ! capture env "sign-in secrets $slug" as_pspm php "$(app_dir)/bin/signin.php" env "$id"; then
+            warn "Cannot read the secrets of sign-in provider $slug; it is not started."; continue
+        fi
+        if [[ "$(cat "$dir/$slug.env" 2>/dev/null)" != "$env"$'\n'"OAUTH2_PROXY_REDIS_PASSWORD=$pw" ]]; then
+            (umask 077; printf '%s\nOAUTH2_PROXY_REDIS_PASSWORD=%s\n' "$env" "$pw" >"$dir/$slug.env"); changed+=("oauth-$slug")
+        fi
+    done
+    install -m 0644 "$rel_dir/oauth2-proxy/compose.yml" "$dir/compose.yml"
+    run "sign-in images" compose -p pspm-signin -f "$dir/compose.yml" pull --quiet || warn "Could not pull the sign-in images."
+    run "sign-in containers" compose -p pspm-signin -f "$dir/compose.yml" up -d --remove-orphans || warn "Could not start the sign-in containers (see log)."
+    local c
+    for c in $(printf '%s\n' "${changed[@]}" | sort -u); do
+        run "recreate $c" compose -p pspm-signin -f "$dir/compose.yml" up -d --force-recreate --no-deps "$c" || warn "Could not restart $c."
+    done
+    # configuration directories of removed providers
+    local d
+    for d in "$dir"/p*/; do
+        [[ -d $d ]] || continue
+        slug=$(basename "$d")
+        jq -e --arg s "$slug" '.providers[] | select(.slug == $s)' "$sum" >/dev/null || rm -rf "$d" "$dir/$slug.env"
+    done
+}
+
+verify_signin() {
+    local sum=$1/summary.json n i port host tenant ok loc
+    n=$(jq '.providers | length' "$sum" 2>/dev/null || echo 0)
+    for ((i = 0; i < n; i++)); do
+        port=$(jq -r ".providers[$i].port" "$sum"); host=$(jq -r ".providers[$i].signin_host" "$sum"); tenant=$(jq -r ".providers[$i].tenant_id" "$sum")
+        ok=0
+        for _ in $(seq 1 30); do
+            [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$port/ready")" == 200 ]] && { ok=1; break; }
+            sleep 1
+        done
+        if [[ $ok != 1 ]]; then warn "Sign-in $host: oauth2-proxy does not answer /ready (is login.microsoftonline.com reachable? docker logs pspm-oauth-$(jq -r ".providers[$i].slug" "$sum"))."; continue; fi
+        loc=$(curl -s -o /dev/null -w '%{redirect_url}' --max-time 5 -H "Host: $host" -H 'X-Forwarded-Proto: https' -H "X-Forwarded-Host: $host" \
+            "http://127.0.0.1:$port/oauth2/start?rd=https%3A%2F%2F$host%2F")
+        if [[ $loc == "https://login.microsoftonline.com/$tenant/"* ]]; then ok "Sign-in $host redirects to Microsoft"
+        else warn "Sign-in $host: /oauth2/start does not redirect to Microsoft (got: ${loc:-nothing})."; fi
+    done
     return 0
 }
 
@@ -288,6 +375,7 @@ rollback_to() {
     error "Rolling back: $why"
     if [[ -n $prev && -d $NGX/releases/$prev ]]; then
         switch_current "$prev"
+        apply_signin "$NGX/releases/$prev"
         reload_nginx || run "restart nginx" systemctl restart nginx
         if verify_release "$prev"; then ok "Back on release $prev; nothing else changed."
         else error "The previous release $prev does not verify either. Check 'systemctl status nginx' and the log."; fi

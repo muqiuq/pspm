@@ -33,7 +33,7 @@ main() {
 
     COMMAND=install
     ASSUME_YES=0 DRY_RUN=0 DISCARD_DRIFT=0 RETRY_CERTS=0 SKIP_UPGRADE=0 FORCE_OS=0
-    APPLY_REVISION="" UPDATE_TO="" UPDATED_FROM="" FIREWALL_ARG=""
+    APPLY_REVISION="" UPDATE_TO="" UPDATED_FROM="" FIREWALL_ARG="" IMPORT_FILE=""
     UPDATE_PASS_ARGS=()
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -49,7 +49,7 @@ main() {
             --skip-upgrade) SKIP_UPGRADE=1 ;;
             --force-os) FORCE_OS=1; UPDATE_PASS_ARGS+=(--force-os) ;;
             --updated-from) UPDATED_FROM=${2:-}; shift ;;
-            --import) echo "install.sh --import comes with the export/import phase (plan §16); it is not built yet." >&2; exit 64 ;;
+            --import) IMPORT_FILE=${2:-}; shift; [[ -r $IMPORT_FILE ]] || { echo "--import needs a readable export file" >&2; exit 64; }; IMPORT_FILE=$(readlink -f "$IMPORT_FILE") ;;
             -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
             *) echo "unknown argument: $1 (see install.sh --help)" >&2; exit 64 ;;
         esac
@@ -83,6 +83,7 @@ main() {
             phase_units
             phase_firewall
             phase_bootstrap
+            [[ -n $IMPORT_FILE ]] && phase_import
             phase_apply
             phase_certificates
             phase_report

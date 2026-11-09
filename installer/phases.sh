@@ -260,7 +260,11 @@ phase_backup() {
         chmod 0640 "$dir/db.dump"; chgrp pspm "$dir/db.dump"
         rm -f "$dir/pg_dump.err"
         ok "Database dump: $dir/db.dump ($(du -h "$dir/db.dump" | cut -f1))"
-        _log INFO "the JSON export (plan §16) is added in a later version"
+        if as_pspm php "$PSPM_REPO/app/bin/export.php" --backup >"$dir/export.json" 2>>"$LOG_FILE"; then
+            chmod 0640 "$dir/export.json"; chgrp pspm "$dir/export.json"; ok "JSON export: $dir/export.json"
+        else
+            rm -f "$dir/export.json"; note "No JSON export (set a backup passphrase in Settings to get one)."
+        fi
     else
         log_raw "$(cat "$dir/pg_dump.err")"
         fail "pg_dump failed; no migration without a backup." 1
@@ -383,7 +387,8 @@ phase_units() {
     install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
     install -m 0755 "$PSPM_REPO/systemd/certbot-deploy-hook" /etc/letsencrypt/renewal-hooks/deploy/50-pspm
     run "daemon-reload" systemctl daemon-reload
-    run "enable units" systemctl enable --now pspm-agent.path pspm-agent.timer || warn "Could not enable the agent units"
+    run "enable units" systemctl enable --now pspm-agent.path pspm-agent.timer pspm-secscan.timer pspm-blocklists.timer pspm-notify.timer pspm-backup.timer \
+        || warn "Could not enable the PSPM timers"
     systemctl enable -q pspm-firewall.service 2>/dev/null || warn "Could not enable pspm-firewall.service"
     systemctl enable -q --now certbot.timer 2>/dev/null || warn "certbot.timer is not active"
     ok "Agent, firewall service, MOTD, certbot hook, tmpfiles$([[ $changed == 1 ]] && echo ' (units updated)')"
@@ -445,6 +450,41 @@ phase_bootstrap() {
     fi
     run "publish state" as_pspm php "$(app_dir)/bin/state.php" || warn "Could not publish the snapshot files yet."
     touch "$ETC/installed"
+    phase_end ok
+}
+
+# ---------------------------------------------------------------- 11b import (install.sh --import)
+phase_import() {
+    phase 11 "Import $(basename "$IMPORT_FILE")"
+    local work pass out ok
+    work=$(mktemp -d /run/pspm/import.XXXXXX); chmod 0755 "$work"
+    cp "$IMPORT_FILE" "$work/import.json"; chmod 0644 "$work/import.json"
+    [[ -t 0 ]] || fail "The import asks for the export passphrase; run it in a terminal." 1
+    printf '  Export passphrase: '; read -r -s pass; printf '\n'
+    _log INFO "import of $IMPORT_FILE (passphrase entered, not logged)"
+    imp() { runuser -u pspm -- env PSPM_IMPORT_PASSPHRASE="$pass" PSPM_IMPORTER="" PSPM_ACTOR="root (${SUDO_USER:-root} via install.sh --import)" php "$(app_dir)/bin/import.php" "$@"; }
+    if ! capture out "import preview" imp preview "$work/import.json"; then rm -rf "$work"; fail "The file cannot be imported (wrong passphrase, changed file or a newer format; see log)." 1; fi
+    log_raw "$out"
+    jq -r '"  exported: \(.exported_at)\n  users: \(.users | join(", "))\n  sites: \(.counts["sites.sites"]), backends: \(.counts["backends.backends"]), CAs: \(.counts["pki.cas"]), sign-in providers: \(.counts["signin.providers"])\n  Let'"'"'s Encrypt material: \(.tls)"' <<<"$out"
+    jq -r '.conflicts[]? | "  conflict: " + .' <<<"$out"
+    if [[ ${ASSUME_YES:-0} != 1 ]]; then printf '  This replaces everything on this box. Type IMPORT to continue: '; read -r ok; [[ $ok == IMPORT ]] || { rm -rf "$work"; fail "Import cancelled." 3; }; fi
+    run "import" imp apply "$work/import.json" || { rm -rf "$work"; fail "The import failed; the database is unchanged (one transaction)." 1; }
+    local tls le
+    tls=$(imp tls "$work/import.json" 2>/dev/null || echo null)
+    le=$(jq -r '.letsencrypt // ""' <<<"$tls" 2>/dev/null)
+    if [[ -n $le ]]; then
+        [[ -d /etc/letsencrypt ]] && cp -a /etc/letsencrypt "/etc/letsencrypt.pre-import-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p /etc/letsencrypt
+        if base64 -d <<<"$le" | tar -C /etc/letsencrypt -xzf -; then ok "Let's Encrypt material restored"; letsencrypt_acls; else warn "The Let's Encrypt material could not be unpacked."; fi
+        jq -r '.never_block // empty' <<<"$tls" >"$ETC/never-block.new" && [[ -s $ETC/never-block.new ]] && mv "$ETC/never-block.new" "$ETC/never-block"
+        rm -f "$ETC/never-block.new"
+    fi
+    rm -rf "$work"
+    run "commit imported configuration" as_pspm php "$(app_dir)/bin/revision.php" commit-working "imported from $(basename "$IMPORT_FILE")" \
+        || warn "The imported configuration is not valid as it is; fix it on Changes."
+    ADMIN_PASSWORD=""   # the users come from the file
+    ASSUME_YES=1
+    ok "Imported; the configuration is applied next"
     phase_end ok
 }
 

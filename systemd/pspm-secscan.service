@@ -1,0 +1,15 @@
+[Unit]
+Description=PSPM security scan (security log, AI verdicts, behaviour, honeypots)
+After=network-online.target docker.service
+ConditionPathExists=/srv/pspm/app/current/bin/secscan.php
+
+[Service]
+Type=oneshot
+User=pspm
+Group=pspm
+ExecStart=/usr/bin/php /srv/pspm/app/current/bin/secscan.php
+Nice=10
+TimeoutStartSec=900
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes

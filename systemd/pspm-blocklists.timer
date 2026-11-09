@@ -1,0 +1,11 @@
+[Unit]
+Description=PSPM external blocklists (timer)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=10s
+Unit=pspm-blocklists.service
+
+[Install]
+WantedBy=timers.target

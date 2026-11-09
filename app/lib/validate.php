@@ -205,7 +205,9 @@ final class Validate
                 'hsts' => ['mode' => 'default', 'max_age' => 31536000, 'include_subdomains' => true, 'preload' => false]],
             'port80' => 'redirect',
             'client_certs' => 'optional',
-            'access' => ['conditions' => ['lan', 'cleared', 'cert'], 'denied' => '403', 'denied_url' => ''],
+            'access' => ['conditions' => ['lan', 'cleared', 'cert'], 'denied' => '403', 'denied_url' => '',
+                'signin' => ['mode' => 'none', 'provider' => '', 'groups' => [], 'emails' => [], 'domains' => [],
+                    'headers' => ['X-Forwarded-User', 'X-Forwarded-Email', 'X-Remote-User'], 'pass_token' => false, 'nonbrowser_401' => true]],
             'limits' => ['max_body' => '10m', 'rate' => 'standard', 'limit_conn' => 0],
             'proxy' => ['backend' => '', 'host_header' => 'client', 'host_fixed' => '', 'connect_timeout' => 10,
                 'read_timeout' => 60, 'send_timeout' => 60, 'websocket' => true,
@@ -384,7 +386,32 @@ final class Validate
         if (!$conds) { $e['conditions'] = 'Choose at least one condition.'; $conds = ['lan']; }
         if (in_array('public', $conds, true)) $conds = ['public'];
         $a = ['conditions' => $conds];
+        if (!$site && isset($in['signin']) && $in['signin'] !== '') {
+            $a['signin'] = self::enum($in['signin'], ['none', 'alternative', 'required']) ?? 'none';
+        }
         if ($site) {
+            $si = (array)($in['signin'] ?? []);
+            $sg = ['mode' => self::enum($si['mode'] ?? 'none', ['none', 'alternative', 'required']) ?? 'none',
+                'provider' => self::uuid($si['provider'] ?? '') ?? '', 'groups' => [], 'emails' => [], 'domains' => [],
+                'headers' => array_values(array_intersect(array_keys(Signin::HEADERS), (array)($si['headers'] ?? []))),
+                'pass_token' => (bool)($si['pass_token'] ?? false), 'nonbrowser_401' => (bool)($si['nonbrowser_401'] ?? true)];
+            foreach ((array)($si['groups'] ?? []) as $g) {
+                $g = trim((string)$g);
+                if ($g === '') continue;
+                if (preg_match('/^[A-Za-z0-9._@-][A-Za-z0-9 ._@-]{0,127}$/', $g)) $sg['groups'][] = $g; else $e['signin.groups'] = "Not a group id or role: $g";
+            }
+            foreach ((array)($si['emails'] ?? []) as $m) {
+                if (trim((string)$m) === '') continue;
+                if ($v = self::email((string)$m)) $sg['emails'][] = strtolower($v); else $e['signin.emails'] = "Not an e-mail address: $m";
+            }
+            foreach ((array)($si['domains'] ?? []) as $d) {
+                if (trim((string)$d) === '') continue;
+                if ($v = self::host((string)$d)) $sg['domains'][] = $v; else $e['signin.domains'] = "Not a domain: $d";
+            }
+            foreach (['groups', 'emails', 'domains'] as $k) $sg[$k] = array_values(array_unique($sg[$k]));
+            if (!$sg['pass_token']) $sg['headers'] = array_values(array_diff($sg['headers'], ['X-Forwarded-Access-Token']));
+            if ($sg['mode'] !== 'none' && $sg['provider'] === '') $e['signin.provider'] = 'Choose the sign-in provider.';
+            $a['signin'] = $sg;
             $a['denied'] = self::enum($in['denied'] ?? '403', ['403', '404', 'redirect', 'close']) ?? '403';
             $a['denied_url'] = '';
             if ($a['denied'] === 'redirect') {

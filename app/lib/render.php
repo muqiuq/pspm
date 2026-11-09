@@ -19,6 +19,9 @@ final class Renderer
     private array $pendingCerts = [];
     private array $webports = [80, 443];
     private array $summary = [];
+    private array $providers = [];
+    private array $providerHosts = [];
+    private array $providerToken = [];
 
     public const IDENTITY_HEADERS = ['X-Forwarded-User', 'X-Forwarded-Email', 'X-Forwarded-Groups',
         'X-Forwarded-Preferred-Username', 'X-Remote-User', 'X-Forwarded-Access-Token'];
@@ -42,9 +45,26 @@ final class Renderer
         if ($errors) return ['files' => [], 'summary' => [], 'warnings' => [], 'errors' => $errors];
         foreach ($this->doc['backends'] as $b) $this->backends[$b['id']] = $b;
         $g = $this->doc['global'];
+        // Client-certificate CAs nginx trusts (static configuration, plan §13.1).
+        $cas = $this->doc['cas'] ?? [];
+        usort($cas, fn($a, $b) => strcmp($a['id'], $b['id']));
+        $this->facts['ca_bundle'] = (bool)$cas;
+        if ($cas) {
+            $this->files['ca/clients.pem'] = implode('', array_map(fn($c) => rtrim($c['cert_pem']) . "\n", $cas));
+            foreach ($cas as $c) $this->files['ca/client-' . $c['id'] . '.pem'] = rtrim($c['cert_pem']) . "\n";
+        }
 
         $sites = array_values(array_filter($this->doc['sites'], fn($s) => !empty($s['enabled'])));
         usort($sites, fn($a, $b) => strcmp($a['hosts'][0], $b['hosts'][0]));
+        $provs = $this->doc['providers'] ?? [];
+        usort($provs, fn($a, $b) => strcmp($a['id'], $b['id']));
+        foreach ($provs as $p) $this->providers[$p['id']] = $p;
+        foreach ($sites as $s) {
+            if (!$this->signinProvider($s)) continue;
+            $pid = $s['access']['signin']['provider'];
+            $this->providerHosts[$pid] = array_merge($this->providerHosts[$pid] ?? [], $s['hosts']);
+            $this->providerToken[$pid] = ($this->providerToken[$pid] ?? false) || !empty($s['access']['signin']['pass_token']);
+        }
 
         $this->files['conf/http-generated.conf'] = $this->httpGenerated($g);
         $siteSummaries = [];
@@ -53,6 +73,13 @@ final class Renderer
             $siteSummaries[] = $st;
         }
         $this->files['conf/upstreams.conf'] = $this->upstreams($sites);
+        $this->files['conf/signin.conf'] = $this->signinHosts($g);
+        if ($this->providers) {
+            foreach ($this->providers as $p) {
+                $this->files['oauth2-proxy/' . Signin::slug($p['id']) . '.cfg'] = Signin::config($p, $this->providerHosts[$p['id']] ?? [], $this->providerToken[$p['id']] ?? false);
+            }
+            $this->files['oauth2-proxy/compose.yml'] = Signin::compose(array_values($this->providers));
+        }
         [$system, $admin] = $this->system($g);
         $this->files['conf/system.conf'] = $system;
         $this->files['conf/ui.conf'] = $this->ui();
@@ -64,6 +91,9 @@ final class Renderer
         }
         ksort($this->files);
         sort($this->webports);
+        $this->summary['providers'] = array_map(fn($p) => ['id' => $p['id'], 'slug' => Signin::slug($p['id']), 'name' => $p['name'],
+            'port' => $p['port'], 'signin_host' => $p['signin_host'], 'tenant_id' => $p['tenant_id'],
+            'sites' => array_values(array_unique($this->providerHosts[$p['id']] ?? []))], array_values($this->providers));
         $this->summary += ['sites' => $siteSummaries, 'admin' => $admin, 'webports' => array_values(array_unique($this->webports)),
             'pending_certs' => array_values($this->pendingCerts), 'acme_email' => $g['acme_email']];
         return ['files' => $this->files, 'summary' => $this->summary, 'warnings' => $this->warnings, 'errors' => []];
@@ -100,6 +130,7 @@ final class Renderer
             include conf/http-generated.conf;
             include conf/upstreams.conf;
             include conf/system.conf;
+            include conf/signin.conf;
             include sites/*.conf;
         }
 
@@ -138,25 +169,15 @@ final class Renderer
 
         $o = "# Catch-all, management UI and loopback listeners.\n\n";
         // Port 80 catch-all
-        $o .= "server {\n    listen 80 default_server;\n" . ($v6 ? "    listen [::]:80 default_server;\n" : '') . "    server_name _;\n$vars";
-        $o .= "    rewrite_by_lua_file lua/block.lua;\n";
-        if ($ipUi) {
-            $o .= "    # No admin host name in effect: the UI answers by IP, to private addresses only (plan §8.2).\n";
-            $o .= "    if (\$pspm_ip_ui = 0) {\n        return 444;\n    }\n    location / {\n        return 301 https://\$host\$request_uri;\n    }\n";
-        } else {
-            $o .= "    return 444;\n";
-        }
-        $o .= "}\n\n";
+        // unknown.lua answers the UI by IP to private addresses while no admin host name is in
+        // effect (plan §8.2); everything else is closed and counted by the unknown-host rule.
+        $byIp = '    set $pspm_ui_by_ip ' . ($ipUi ? '1' : '0') . ";\n    rewrite_by_lua_file lua/unknown.lua;\n";
+        $o .= "server {\n    listen 80 default_server;\n" . ($v6 ? "    listen [::]:80 default_server;\n" : '') . "    server_name _;\n$vars$byIp";
+        $o .= "    location / {\n        return 301 https://\$host\$request_uri;\n    }\n}\n\n";
         // Port 443 catch-all
         $o .= "server {\n    listen 443 ssl default_server;\n" . ($v6 ? "    listen [::]:443 ssl default_server;\n" : '') . "    server_name _;\n";
-        $o .= "    ssl_certificate {$p['ip_cert']};\n    ssl_certificate_key {$p['ip_key']};\n    include static/tls-intermediate.conf;\n$vars";
-        $o .= "    rewrite_by_lua_file lua/block.lua;\n";
-        if ($ipUi) {
-            $o .= "    if (\$pspm_ip_ui = 0) {\n        return 444;\n    }\n    set \$pspm_listener ip;\n    include conf/ui.conf;\n";
-        } else {
-            $o .= "    return 444;\n";
-        }
-        $o .= "}\n\n";
+        $o .= "    ssl_certificate {$p['ip_cert']};\n    ssl_certificate_key {$p['ip_key']};\n    include static/tls-intermediate.conf;\n$vars$byIp";
+        $o .= "    set \$pspm_listener ip;\n    include conf/ui.conf;\n}\n\n";
         // Admin host name
         if ($g['admin_host'] !== '') {
             $h = $g['admin_host'];
@@ -188,6 +209,9 @@ final class Renderer
         $o .= "    include conf/release.conf;\n";
         $o .= "    location = /pspm-sync {\n        default_type application/json;\n        content_by_lua_file lua/sync.lua;\n    }\n";
         $o .= "    location = /healthz {\n" . $this->fastcgi('loopback') . "    }\n";
+        $o .= "    # Declares the variables Lua sets per request (never executed).\n";
+        $o .= "    location = /.pspm/declare {\n        internal;\n        set \$pspm_outcome \"\";\n        set \$pspm_user \"\";\n        set \$pspm_email \"\";\n"
+            . "        set \$pspm_groups \"\";\n        set \$pspm_puser \"\";\n        set \$pspm_token \"\";\n        return 404;\n    }\n";
         $o .= "    location / {\n        return 404;\n    }\n}\n";
         return [$o, $admin];
     }
@@ -252,7 +276,8 @@ final class Renderer
             if (!$cert) $st['pending'] = true;
             else $st['cert'] = $cert['name'];
         }
-        $siteVars = $this->vars($s['id'], implode(',', $s['access']['conditions']), $s['access']['denied'], $s['access']['denied_url']);
+        $siteVars = $this->vars($s['id'], implode(',', $s['access']['conditions']), $s['access']['denied'], $s['access']['denied_url'])
+            . $this->signinVars($s);
         $o = "# Site $host (" . $s['id'] . ")\n";
 
         // Port 80
@@ -260,6 +285,7 @@ final class Renderer
         $o .= "server {\n    listen 80;\n" . ($v6 ? "    listen [::]:80;\n" : '') . "    server_name $names;\n$siteVars";
         $o .= "    rewrite_by_lua_file lua/block.lua;\n    access_by_lua_file lua/gate.lua;\n";
         if (!$acmeProxied) $o .= $this->acmeLocation();
+        $o .= $this->signinAuthLocation($s);
         if ($s['tls']['mode'] === 'none' || $s['port80'] === 'serve') {
             if ($s['tls']['mode'] === 'none') $o .= $this->linkLocation($s);
             $o .= $this->routes($s, $g, 'http', $acmeProxied);
@@ -281,7 +307,7 @@ final class Renderer
             if ($s['tls']['http2']) $o .= "    http2 on;\n";
             $o .= "    server_name $names;\n" . $this->tlsBlock($s, $g, $cert) . $siteVars;
             $o .= "    rewrite_by_lua_file lua/block.lua;\n    access_by_lua_file lua/gate.lua;\n";
-            $o .= $this->linkLocation($s) . $this->routes($s, $g, 'https', $acmeProxied) . $this->errorPages($g['error_pages']) . "}\n";
+            $o .= $this->linkLocation($s) . $this->signinAuthLocation($s) . $this->routes($s, $g, 'https', $acmeProxied) . $this->errorPages($g['error_pages']) . "}\n";
         }
 
         // Extra listeners
@@ -292,7 +318,7 @@ final class Renderer
             if ($v6) $o .= "    listen [::]:{$li['port']}" . ($li['tls'] ? ' ssl' : '') . ";\n";
             $o .= "    server_name $names;\n" . ($li['tls'] ? $this->tlsBlock($s, $g, $cert) : '') . $siteVars;
             $o .= "    rewrite_by_lua_file lua/block.lua;\n    access_by_lua_file lua/gate.lua;\n";
-            $o .= $this->routes($s, $g, 'port:' . $li['port'], $acmeProxied) . $this->errorPages($g['error_pages']) . "}\n";
+            $o .= $this->signinAuthLocation($s) . $this->routes($s, $g, 'port:' . $li['port'], $acmeProxied) . $this->errorPages($g['error_pages']) . "}\n";
         }
         return $o;
     }
@@ -330,7 +356,11 @@ final class Renderer
         $o = '';
         $ov = $r['overrides'];
         if ($r['action'] === 'acme_proxy') $o .= "{$i}set \$pspm_allow public;\n";
-        elseif (!empty($ov['access'])) $o .= "{$i}set \$pspm_allow " . implode(',', $ov['access']['conditions']) . ";\n";
+        elseif (!empty($ov['access'])) {
+            $o .= "{$i}set \$pspm_allow " . implode(',', $ov['access']['conditions']) . ";\n";
+            if (isset($ov['access']['signin']) && $this->signinProvider($s)) $o .= "{$i}set \$pspm_signin {$ov['access']['signin']};\n";
+            elseif (isset($ov['access']['signin'])) $o .= "{$i}set \$pspm_signin none;\n";
+        }
         if ($r['action'] === 'status') return $o . "{$i}return {$r['status']};\n";
         if ($r['action'] === 'redirect') return $o . "{$i}return {$r['redirect_code']} \"{$r['redirect_url']}\";\n";
 
@@ -351,8 +381,12 @@ final class Renderer
         }
         if ($p['websocket']) $o .= "{$i}proxy_set_header Upgrade \$http_upgrade;\n{$i}proxy_set_header Connection \$pspm_connection_upgrade;\n";
         else $o .= "{$i}proxy_set_header Connection \"\";\n";
-        // Identity headers are always set; empty means nginx does not send them (plan §12.4).
-        foreach (self::IDENTITY_HEADERS as $hn) $o .= "{$i}proxy_set_header $hn \"\";\n";
+        // Identity headers are always set: to the signed-in identity, or empty, which means
+        // nginx does not send them. A client can never pass its own (plan §12.4).
+        $selected = $this->signinProvider($s) ? ($s['access']['signin']['headers'] ?? []) : [];
+        $vars = ['X-Forwarded-User' => '$pspm_user', 'X-Forwarded-Email' => '$pspm_email', 'X-Forwarded-Groups' => '$pspm_groups',
+            'X-Forwarded-Preferred-Username' => '$pspm_puser', 'X-Remote-User' => '$pspm_email', 'X-Forwarded-Access-Token' => '$pspm_token'];
+        foreach (self::IDENTITY_HEADERS as $hn) $o .= "{$i}proxy_set_header $hn " . (in_array($hn, $selected, true) ? $vars[$hn] : '""') . ";\n";
         foreach ($s['headers']['request'] as $hd) {
             $v = match ($hd['type']) { 'client_addr' => '$remote_addr', 'scheme' => '$scheme', 'host' => '$host',
                 'request_id' => '$request_id', 'client_cert_fp' => '$ssl_client_fingerprint', default => '"' . $hd['value'] . '"' };
@@ -392,6 +426,69 @@ final class Renderer
         return 'max-age=' . $h['max_age'] . ($h['include_subdomains'] ? '; includeSubDomains' : '') . ($h['preload'] ? '; preload' : '');
     }
 
+    /** The provider a site signs in with, or null when neither the site nor a route uses sign-in. */
+    private function signinProvider(array $s): ?array
+    {
+        $si = $s['access']['signin'] ?? ['mode' => 'none'];
+        $uses = ($si['mode'] ?? 'none') !== 'none';
+        foreach ($s['routes'] as $r) $uses = $uses || ($r['overrides']['access']['signin'] ?? 'none') !== 'none';
+        return $uses ? ($this->providers[$si['provider'] ?? ''] ?? null) : null;
+    }
+
+    private function signinVars(array $s): string
+    {
+        $p = $this->signinProvider($s);
+        if (!$p) return '';
+        $si = $s['access']['signin'];
+        $q = [];
+        if ($si['groups']) $q[] = 'allowed_groups=' . rawurlencode(implode(',', $si['groups']));
+        if ($si['emails']) $q[] = 'allowed_emails=' . rawurlencode(implode(',', $si['emails']));
+        if ($si['domains']) $q[] = 'allowed_email_domains=' . rawurlencode(implode(',', $si['domains']));
+        return "    set \$pspm_signin {$si['mode']};\n    set \$pspm_signin_host {$p['signin_host']};\n"
+             . '    set $pspm_signin_args "' . implode('&', $q) . "\";\n    set \$pspm_signin_nb401 " . ($si['nonbrowser_401'] ? '1' : '0') . ";\n";
+    }
+
+    /** Internal location for the sign-in check (the subrequest from gate.lua, plan §12.3). */
+    private function signinAuthLocation(array $s): string
+    {
+        $p = $this->signinProvider($s);
+        if (!$p) return '';
+        return "    location = /.pspm/signin/auth {\n        internal;\n        proxy_pass http://127.0.0.1:{$p['port']}/oauth2/auth;\n"
+             . "        proxy_pass_request_body off;\n        proxy_set_header Content-Length \"\";\n"
+             . "        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$remote_addr;\n"
+             . "        proxy_set_header X-Forwarded-Proto https;\n        proxy_set_header X-Forwarded-Host \$host;\n"
+             . "        proxy_set_header X-Forwarded-Uri \$request_uri;\n        proxy_set_header X-Forwarded-Method \$request_method;\n"
+             . "        proxy_set_header X-Scheme https;\n        proxy_connect_timeout 2s;\n        proxy_read_timeout 3s;\n    }\n";
+    }
+
+    /** The sign-in host of each provider: /oauth2/* to its oauth2-proxy (plan §12.3). */
+    private function signinHosts(array $g): string
+    {
+        $o = "# Sign-in hosts (Microsoft sign-in through oauth2-proxy)\n";
+        $v6 = $this->facts['ipv6'];
+        foreach ($this->providers as $p) {
+            $h = $p['signin_host'];
+            $name = 'pspm-signin-' . Signin::slug($p['id']);
+            $cert = $this->certFor([$h], $name);
+            if (!$cert || !$cert['covers']) $this->pendingCerts[$name] = ['name' => $name, 'hosts' => [$h], 'site' => "sign-in {$p['name']}"];
+            $o .= "server {\n    listen 80;\n" . ($v6 ? "    listen [::]:80;\n" : '') . "    server_name $h;\n" . $this->vars('', 'public', '404');
+            $o .= "    rewrite_by_lua_file lua/block.lua;\n" . $this->acmeLocation();
+            $o .= $cert ? "    location / {\n        return 301 https://\$host\$request_uri;\n    }\n}\n" : "    location / {\n        return 503;\n    }\n}\n";
+            if (!$cert) { $this->warnings[] = "Sign-in host $h waits for its certificate; sites that require sign-in answer 503 until then."; continue; }
+            $o .= "server {\n    listen 443 ssl;\n" . ($v6 ? "    listen [::]:443 ssl;\n" : '') . "    http2 on;\n    server_name $h;\n";
+            $o .= "    ssl_certificate {$cert['fullchain']};\n    ssl_certificate_key {$cert['key']};\n    include static/tls-{$g['tls_profile']}.conf;\n";
+            $o .= $this->vars('', 'public', '404') . "    rewrite_by_lua_file lua/block.lua;\n";
+            $o .= "    add_header Strict-Transport-Security \"max-age=31536000\" always;\n";
+            $o .= "    location /oauth2/ {\n        limit_req zone=pspm_signin burst=120 nodelay;\n        proxy_pass http://127.0.0.1:{$p['port']};\n"
+                . "        proxy_set_header Host \$host;\n        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$remote_addr;\n"
+                . "        proxy_set_header X-Forwarded-Proto https;\n        proxy_set_header X-Forwarded-Host \$host;\n        proxy_set_header X-Scheme https;\n"
+                . "        proxy_buffer_size 128k;\n        proxy_buffers 8 256k;\n        proxy_connect_timeout 5s;\n        proxy_read_timeout 30s;\n    }\n";
+            $o .= "    location = / {\n        " . ($p['start_url'] !== '' ? "return 302 \"{$p['start_url']}\";" : 'return 404;') . "\n    }\n";
+            $o .= "    location / {\n        return 404;\n    }\n}\n";
+        }
+        return $o;
+    }
+
     /** Access links live on the site's own host names (plan §11.1); only when the policy accepts cleared addresses. */
     private function linkLocation(array $s): string
     {
@@ -418,8 +515,11 @@ final class Renderer
 
     private function vars(string $site, string $allow, string $deny, string $denyUrl = ''): string
     {
+        // $pspm_outcome and the identity variables are not set here: a server-level "set"
+        // runs again on internal redirects (error pages) and would wipe what Lua recorded.
+        // They are declared once in conf/system.conf.
         return "    set \$pspm_site \"$site\";\n    set \$pspm_allow $allow;\n    set \$pspm_deny $deny;\n"
-             . "    set \$pspm_deny_url \"$denyUrl\";\n    set \$pspm_outcome \"\";\n    set \$pspm_listener \"\";\n";
+             . "    set \$pspm_deny_url \"$denyUrl\";\n    set \$pspm_listener \"\";\n    set \$pspm_signin none;\n";
     }
 
     // ---------------------------------------------------------------- upstreams and certificates

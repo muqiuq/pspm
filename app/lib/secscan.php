@@ -1,0 +1,324 @@
+<?php
+declare(strict_types=1);
+
+/**
+ * The security scan (plan §15.1): every minute it reads the new lines of the security log
+ * (blocks from traps and the unknown-host rule follow within a minute); every 5 minutes it
+ * analyses: trust registry, candidates, AI verdicts, behaviour, traps.
+ */
+final class SecScan
+{
+    public const MAX_LINES = 200000;
+    public const TAGS = [
+        'env' => '#/\.env(\.|$)#', 'git' => '#/\.(git|svn|hg)/#', 'wordpress' => '#/(wp-login\.php|wp-admin|xmlrpc\.php|wp-content/plugins)#',
+        'phpmyadmin' => '#/(phpmyadmin|pma|myadmin)#', 'cgi' => '#/cgi-bin/#', 'traversal' => '#\.\./|%2e%2e#', 'passwd' => '#/etc/(passwd|shadow)#',
+        'phpunit' => '#/vendor/phpunit|eval-stdin\.php#', 'actuator' => '#/actuator(/|$)#', 'secrets' => '#/\.(aws|ssh|docker)/|/id_rsa#',
+        'router' => '#/(boaform|hnap1|goform|setup\.cgi)#', 'shell' => '#(shell|cmd|exec)\.php|/bin/sh#', 'config' => '#/(config\.json|web\.config|\.htpasswd|server-status)#',
+    ];
+
+    public static function logPath(): string { return getenv('PSPM_SECLOG') ?: '/var/log/nginx/pspm-security.log'; }
+
+    public static function state(string $key): mixed
+    {
+        $v = DB::val('SELECT value FROM scan_state WHERE key = ?', [$key]);
+        return $v === null ? null : json_dec($v);
+    }
+
+    public static function setState(string $key, mixed $value): void
+    {
+        DB::q('INSERT INTO scan_state (key, value, updated_at) VALUES (?, ?::jsonb, now()) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()',
+            [$key, json_enc($value)]);
+    }
+
+    public static function run(bool $forceFull = false): array
+    {
+        if (!DB::val('SELECT pg_try_advisory_lock(424242)')) return ['skipped' => 'another scan is running'];
+        $run = (int)DB::val("INSERT INTO scan_runs (kind) VALUES ('scan') RETURNING id");
+        try {
+            $stats = self::ingest();
+            $last = self::state('last_full');
+            $now = self::state('run_now');
+            if ($forceFull || $now || !$last || time() - strtotime($last['at']) >= 290) {
+                if ($now) DB::q("DELETE FROM scan_state WHERE key = 'run_now'");
+                $stats['full'] = self::analyse((bool)$now || $forceFull);
+                self::setState('last_full', ['at' => gmdate('c')]);
+            }
+            DB::q('UPDATE scan_runs SET finished_at = now(), stats = ?::jsonb WHERE id = ?', [json_enc($stats), $run]);
+            return $stats;
+        } catch (Throwable $e) {
+            DB::q('UPDATE scan_runs SET finished_at = now(), stats = ?::jsonb WHERE id = ?', [json_enc(['error' => $e->getMessage()]), $run]);
+            throw $e;
+        } finally {
+            DB::val('SELECT pg_advisory_unlock(424242)');
+        }
+    }
+
+    // ---------------------------------------------------------------- reading the log
+
+    /** Read new lines since the cursor; survives log rotation (the rotated file is .1). */
+    private static function lines(): Generator
+    {
+        $f = self::logPath();
+        $cur = self::state('cursor') ?? ['inode' => 0, 'offset' => 0];
+        clearstatcache();
+        $st = @stat($f);
+        if (!$st) return;
+        $files = [];
+        if ((int)$cur['inode'] !== 0 && (int)$cur['inode'] !== $st['ino']) {
+            $r = @stat("$f.1");
+            if ($r && $r['ino'] === (int)$cur['inode']) $files[] = ["$f.1", (int)$cur['offset']];
+            $files[] = [$f, 0];
+        } else {
+            $files[] = [$f, $st['size'] < (int)$cur['offset'] ? 0 : (int)$cur['offset']];
+        }
+        $n = 0;
+        foreach ($files as [$path, $off]) {
+            $h = @fopen($path, 'r');
+            if (!$h) continue;
+            fseek($h, $off);
+            while ($n < self::MAX_LINES && ($line = fgets($h)) !== false) {
+                if (!str_ends_with($line, "\n")) break;   // a line being written
+                $n++;
+                $d = json_decode($line, true);
+                if (is_array($d) && isset($d['ip'], $d['t'])) yield $d;
+                $off = ftell($h);
+            }
+            if ($path === $f) self::setState('cursor', ['inode' => $st['ino'], 'offset' => $off]);
+            fclose($h);
+        }
+    }
+
+    private static function tags(string $path): array
+    {
+        $t = [];
+        foreach (self::TAGS as $k => $re) if (preg_match($re, $path)) $t[] = $k;
+        return $t;
+    }
+
+    /** Ingest: fast blocks, activity, trust, behaviour features, attack paths. */
+    public static function ingest(): array
+    {
+        $act = $beh = $paths = $trust = [];
+        $fastBlocks = $trapHits = [];
+        $lines = 0;
+        $clearedLinks = [];
+        foreach (self::lines() as $d) {
+            $lines++;
+            $ip = (string)$d['ip'];
+            if (!IP::valid($ip)) continue;
+            $key = IP::clientCidr($ip);
+            $ts = strtotime((string)$d['t']) ?: time();
+            $hour = gmdate('Y-m-d\TH:00:00\Z', $ts);
+            $out = (string)($d['out'] ?? '');
+            $st = (int)($d['st'] ?? 0);
+            $ust = (int)($d['ust'] ?? 0);
+            $path = strtolower(substr((string)($d['nuri'] ?? $d['uri'] ?? '/'), 0, 200));
+            $site = (string)($d['site'] ?? '');
+            $host = strtolower((string)($d['host'] ?? ''));
+            $denied = in_array($out, ['denied', 'banned', 'blocked', 'signin-denied'], true) || str_starts_with($out, 'trap');
+            $unknown = str_starts_with($out, 'unknown');
+            // fast pass: blocks nginx already placed
+            if (preg_match('/^trap:(\d+)$/', $out, $m)) { $fastBlocks[$key] = ['trap', "honeypot hit: $host$path (trap {$m[1]})"]; $trapHits[(int)$m[1]] = ($trapHits[(int)$m[1]] ?? 0) + 1; }
+            elseif (preg_match('/^trap-shadow:(\d+)$/', $out, $m)) $trapHits[(int)$m[1]] = ($trapHits[(int)$m[1]] ?? 0) + 1;
+            elseif ($out === 'unknown-block') $fastBlocks[$key] = ['unknown-host', 'requests for host names that no site serves'];
+            // activity per client and hour
+            $a = &$act["$key|$hour"];
+            $a ??= ['req' => 0, 'denied' => 0, 's404' => 0, 's5xx' => 0, 'unknown' => 0, 'ust401' => 0, 'bytes' => 0, 'posts' => 0, 'tags' => [], 'paths' => [], 'uas' => [], 'sites' => [], 'out' => []];
+            $a['req']++; $a['bytes'] += (int)($d['bs'] ?? 0);
+            if ($denied) $a['denied']++;
+            if ($st === 404) $a['s404']++;
+            if ($st >= 500) $a['s5xx']++;
+            if ($unknown) $a['unknown']++;
+            if ($ust === 401 || $ust === 403) $a['ust401']++;
+            if (($d['m'] ?? '') === 'POST') $a['posts']++;
+            foreach (self::tags($path) as $t) $a['tags'][$t] = ($a['tags'][$t] ?? 0) + 1;
+            if (count($a['paths']) < 40 || isset($a['paths'][$path])) $a['paths'][$path] = ($a['paths'][$path] ?? 0) + 1;
+            $ua = substr((string)($d['ua'] ?? ''), 0, 150);
+            if (count($a['uas']) < 5 || isset($a['uas'][$ua])) $a['uas'][$ua] = ($a['uas'][$ua] ?? 0) + 1;
+            if ($site !== '') $a['sites'][$site] = true;
+            $a['out'][$out ?: '-'] = ($a['out'][$out ?: '-'] ?? 0) + 1;
+            unset($a);
+            // trust registry: authorised by certificate or sign-in (plan §15.2)
+            if ($out === 'cert' && !empty($d['fp'])) $trust[$key] = 'cert:' . $d['fp'];
+            if ($out === 'signin' && !empty($d['user'])) $trust[$key] = 'signin:' . $d['user'];
+            if ($out === 'cleared') $trust[$key] ??= 'cleared';
+            // behaviour features: per address, certificate, user, link grant
+            $actors = [['ip', $key]];
+            if ($out === 'cert' && !empty($d['fp'])) $actors[] = ['cert', (string)$d['fp']];
+            if (!empty($d['user'])) $actors[] = ['user', strtolower((string)$d['user'])];
+            if ($out === 'cleared' && $site !== '') {
+                $ck = "$site|$key";
+                $clearedLinks[$ck] ??= (string)(DB::val('SELECT link_id FROM cleared_ips WHERE site_id = ? AND ip = ?::cidr', [$site, $key]) ?? '');
+                if ($clearedLinks[$ck] !== '') $actors[] = ['link', $clearedLinks[$ck]];
+            }
+            foreach ($actors as [$type, $actor]) {
+                $b = &$beh["$type|$actor|$hour"];
+                $b ??= ['req' => 0, 'bytes' => 0, 'denied' => 0, 's404' => 0, 'ust401' => 0, 'posts' => 0, 'paths' => [], 'p404' => [], 'sites' => [], 'dsites' => [], 'ips' => [], 'uas' => [],
+                    'mins' => array_fill(0, 60, 0), 'login401' => []];
+                $b['req']++; $b['bytes'] += (int)($d['bs'] ?? 0);
+                if ($denied) $b['denied']++;
+                if ($st === 404) { $b['s404']++; if (count($b['p404']) < 200) $b['p404'][$path] = true; }
+                if ($ust === 401 || $ust === 403) {
+                    $b['ust401']++;
+                    if (preg_match('#login|signin|sign-in|auth|session|token|password#', $path)) $b['login401']["$site $path"] = ($b['login401']["$site $path"] ?? 0) + 1;
+                }
+                if (($d['m'] ?? '') === 'POST') $b['posts']++;
+                $norm = preg_replace('#/\d+#', '/{n}', $path) ?? $path;
+                if (count($b['paths']) < 100 || isset($b['paths'][$norm])) $b['paths'][$norm] = ($b['paths'][$norm] ?? 0) + 1;
+                if ($site !== '') {
+                    $b['sites'][$site] = ($b['sites'][$site] ?? 0) + 1;
+                    if ($denied) $b['dsites'][$site] = ($b['dsites'][$site] ?? 0) + 1;
+                }
+                if (count($b['ips']) < 50) $b['ips'][$key] = true;
+                if (count($b['uas']) < 10 || isset($b['uas'][$ua])) $b['uas'][$ua] = true;
+                $b['mins'][(int)gmdate('i', $ts)]++;
+                unset($b);
+            }
+            // attack paths: refused requests and what the backends answered (trap evidence)
+            if ($host !== '' && ($denied || $unknown || in_array($st, [403, 404, 410, 429, 444], true) || $ust > 0)) {
+                $day = gmdate('Y-m-d', $ts);
+                $p = &$paths["$host|$path|$day"];
+                $p ??= ['total' => 0, 'refused' => 0, 'ust' => [], 'ips' => []];
+                $p['total']++;
+                if ($denied || $unknown || in_array($st, [403, 404, 410, 429, 444], true)) $p['refused']++;
+                if ($ust > 0) $p['ust'][(string)$ust] = ($p['ust'][(string)$ust] ?? 0) + 1;
+                if (count($p['ips']) < 50) $p['ips'][$key] = true;
+                unset($p);
+            }
+        }
+        // write the aggregates
+        DB::tx(function () use ($act, $beh, $paths) {
+            foreach ($act as $k => $v) { [$ip, $hour] = explode('|', $k); self::merge('ip_activity', ['ip' => $ip, 'hour' => $hour], $v); }
+            foreach ($beh as $k => $v) { [$t, $a, $hour] = explode('|', $k, 3); self::merge('behaviour_hours', ['actor_type' => $t, 'actor' => $a, 'hour' => $hour], $v); }
+            foreach ($paths as $k => $v) { [$h, $p, $day] = explode('|', $k, 3); self::merge('attack_paths', ['host' => $h, 'path' => $p, 'day' => $day], $v); }
+        });
+        $days = (int)(Settings::get('trust', [])['authorised_days'] ?? 30);
+        foreach ($trust as $cidr => $source) {
+            if (IP::isPrivate(explode('/', $cidr)[0])) continue;
+            if ($source === 'cleared') {
+                DB::q('UPDATE trusted_ips SET last_seen = now() WHERE ip = ?::cidr', [$cidr]);
+                continue;
+            }
+            DB::q("INSERT INTO trusted_ips (ip, kind, source, last_seen, expires_at) VALUES (?::cidr, 'authorised', ?, now(), now() + make_interval(days => ?))
+                   ON CONFLICT (ip) DO UPDATE SET last_seen = now(), source = CASE WHEN trusted_ips.kind = 'trusted' THEN trusted_ips.source ELSE excluded.source END,
+                     expires_at = CASE WHEN trusted_ips.kind = 'trusted' THEN trusted_ips.expires_at ELSE excluded.expires_at END", [$cidr, $source, $days]);
+        }
+        $blocked = 0;
+        foreach ($fastBlocks as $cidr => [$src, $why]) {
+            if (IP::neverBlocked($cidr) || Blocks::isBlocked($cidr) || Blocks::trusted(explode('/', $cidr)[0])) continue;
+            Blocks::add($cidr, $src, $why, null, true, 'system');
+            $blocked++;
+        }
+        foreach ($trapHits as $id => $n) DB::q('UPDATE traps SET hits = hits + ?, last_hit_at = now() WHERE id = ?', [$n, $id]);
+        if ($blocked || $trust) State::publish('blocked', 'trusted');
+        return ['lines' => $lines, 'fast_blocks' => $blocked, 'trap_hits' => array_sum($trapHits)];
+    }
+
+    /** Read-modify-write merge of a JSON aggregate row (counters add, sets union). */
+    private static function merge(string $table, array $key, array $v): void
+    {
+        $where = implode(' AND ', array_map(fn($k) => "$k = :$k", array_keys($key)));
+        $cur = DB::val("SELECT data FROM $table WHERE $where", $key);
+        if ($cur !== null) $v = self::add(json_dec($cur), $v);
+        $cols = implode(', ', array_keys($key));
+        $vals = implode(', ', array_map(fn($k) => ":$k", array_keys($key)));
+        DB::q("INSERT INTO $table ($cols, data) VALUES ($vals, CAST(:data AS jsonb)) ON CONFLICT ($cols) DO UPDATE SET data = excluded.data", $key + ['data' => json_enc($v)]);
+    }
+
+    private static function add(array $a, array $b): array
+    {
+        foreach ($b as $k => $v) {
+            if (is_int($v) || is_float($v)) $a[$k] = ($a[$k] ?? 0) + $v;
+            elseif (is_bool($v)) $a[$k] = true;
+            elseif (is_array($v) && array_is_list($v) && $v && is_int($v[0] ?? null)) { foreach ($v as $i => $x) $a[$k][$i] = ($a[$k][$i] ?? 0) + $x; }
+            elseif (is_array($v)) { $a[$k] = self::add(is_array($a[$k] ?? null) ? $a[$k] : [], $v); if (count($a[$k]) > 300) $a[$k] = array_slice($a[$k], 0, 300, true); }
+            else $a[$k] = $v;
+        }
+        return $a;
+    }
+
+    // ---------------------------------------------------------------- analysis
+
+    public static function analyse(bool $runNow): array
+    {
+        $stats = ['candidates' => 0, 'ai_calls' => 0, 'blocked' => 0];
+        $runBlocks = 0;
+        // housekeeping
+        DB::q('DELETE FROM trusted_ips WHERE expires_at IS NOT NULL AND expires_at < now()');
+        DB::q('DELETE FROM cleared_ips WHERE expires_at IS NOT NULL AND expires_at < now()');
+        DB::q("DELETE FROM ip_activity WHERE hour < now() - interval '30 days'");
+        DB::q("DELETE FROM behaviour_hours WHERE hour < now() - interval '90 days'");
+        DB::q("DELETE FROM attack_paths WHERE day < now() - interval '30 days'");
+        DB::q("DELETE FROM risk_findings WHERE created_at < now() - interval '1 year'");
+        DB::q("DELETE FROM scan_runs WHERE started_at < now() - interval '30 days'");
+        DB::q("DELETE FROM ai_verdicts WHERE created_at < now() - interval '180 days'");
+        DB::q("DELETE FROM expected_patterns WHERE until < now()");
+
+        // candidates: untrusted addresses over a threshold in 24 h (plan §15.1)
+        $rows = DB::all("SELECT ip::text AS ip, jsonb_agg(data) AS d FROM ip_activity WHERE hour > now() - interval '24 hours' GROUP BY ip");
+        $cands = [];
+        foreach ($rows as $r) {
+            $sum = ['req' => 0, 'denied' => 0, 's404' => 0, 'unknown' => 0, 'tags' => [], 'paths' => [], 'uas' => [], 'ust401' => 0, 'sites' => []];
+            foreach (json_dec($r['d']) as $h) foreach ($sum as $k => $_) {
+                if (is_array($_)) foreach ((array)($h[$k] ?? []) as $x => $n) $sum[$k][$x] = ($sum[$k][$x] ?? 0) + (is_int($n) ? $n : 1);
+                else $sum[$k] += (int)($h[$k] ?? 0);
+            }
+            $ip = explode('/', $r['ip'])[0];
+            if (IP::neverBlocked($r['ip'])) continue;
+            if (!($sum['denied'] >= 10 || $sum['s404'] >= 20 || $sum['unknown'] >= 3 || $sum['tags'])) continue;
+            if (Blocks::isBlocked($r['ip']) || Blocks::trusted($ip)) continue;
+            if (DB::val("SELECT 1 FROM ai_verdicts WHERE kind = 'verdict' AND subject = ? AND created_at > now() - interval '6 hours'", [$r['ip']])) continue;
+            $cands[$r['ip']] = $sum;
+        }
+        uasort($cands, fn($a, $b) => ($b['denied'] + $b['s404'] + 10 * count($b['tags'])) <=> ($a['denied'] + $a['s404'] + 10 * count($a['tags'])));
+        $cands = array_slice($cands, 0, 100, true);
+        $stats['candidates'] = count($cands);
+
+        $ai = AI::settings();
+        $lastCall = self::state('last_ai_call');
+        $due = $runNow || !$lastCall || time() - strtotime($lastCall['at']) >= 60 * (int)$ai['min_interval_min'];
+        if ($cands && $due && AI::available()) {
+            foreach (array_chunk($cands, 25, true) as $batch) {
+                if (!AI::available()) break;
+                $ps = AI::pseudonymiser();
+                $subjects = [];
+                foreach ($batch as $cidr => $s) {
+                    arsort($s['paths']);
+                    $subjects[] = ['subject' => $ps->of('ip', $cidr), 'requests' => $s['req'], 'denied' => $s['denied'], 'not_found' => $s['s404'],
+                        'unknown_host_names' => $s['unknown'], 'backend_401_403' => $s['ust401'], 'sites' => count($s['sites']), 'exploit_tags' => $s['tags'],
+                        'paths' => array_map(fn($p, $n) => [AI::scrubPath((string)$p), $n], array_slice(array_keys($s['paths']), 0, 20), array_slice(array_values($s['paths']), 0, 20)),
+                        'user_agents' => array_slice(array_keys($s['uas']), 0, 3)];
+                }
+                $sys = 'You assess traffic seen by a reverse proxy in the last 24 hours. For each subject decide: "block" for a clear attack '
+                    . '(vulnerability scanning, exploit attempts, credential stuffing, probing for secrets), "watch" when suspicious but unclear, "benign" '
+                    . 'for normal users, crawlers or monitoring. Answer only JSON: {"verdicts":[{"subject":"ip-1","verdict":"block|watch|benign",'
+                    . '"confidence":0.0-1.0,"reason":"one short sentence"}]}';
+                try {
+                    $ans = AI::json($sys, ['subjects' => $subjects]);
+                    $stats['ai_calls']++;
+                } catch (Throwable $e) {
+                    DB::q("INSERT INTO ai_verdicts (kind, subject, outcome, reason, model) VALUES ('verdict', 'batch', 'error', ?, ?)", [mb_substr($e->getMessage(), 0, 300), $ai['model']]);
+                    break;
+                }
+                self::setState('last_ai_call', ['at' => gmdate('c')]);
+                foreach ((array)($ans['verdicts'] ?? []) as $v) {
+                    $cidr = $ps->reverse((string)($v['subject'] ?? ''));
+                    if (!$cidr || !isset($batch[$cidr])) continue;
+                    $verdict = in_array($v['verdict'] ?? '', ['block', 'watch', 'benign'], true) ? $v['verdict'] : 'watch';
+                    $conf = max(0.0, min(1.0, (float)($v['confidence'] ?? 0)));
+                    $ip = explode('/', $cidr)[0];
+                    $why = Blocks::guard($ip, $verdict, $conf);
+                    $outcome = $why ?? Blocks::auto($ip, 'ai', 'AI verdict: ' . mb_substr((string)($v['reason'] ?? ''), 0, 200), $runBlocks);
+                    if ($outcome === 'blocked') $stats['blocked']++;
+                    $ev = array_values(array_filter($subjects, fn($s) => $s['subject'] === $v['subject']))[0] ?? [];
+                    DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model, outcome) VALUES ('verdict', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?)",
+                        [$cidr, $verdict, $conf, mb_substr((string)($v['reason'] ?? ''), 0, 500), json_enc($ev), json_enc($v), $ai['model'], $outcome]);
+                }
+            }
+        }
+        $stats['behaviour'] = Behaviour::analyse($runBlocks);
+        $stats['traps'] = Traps::maintain($runNow);
+        State::publish('blocked', 'trusted', 'cleared', 'traps', 'meta');
+        return $stats;
+    }
+}
