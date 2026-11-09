@@ -7,6 +7,7 @@
 //   php pspm-agent.php setup    create sets, chain and jump (idempotent)
 //   php pspm-agent.php sync     fill the sets, repair the chain, write status
 //   php pspm-agent.php off|on   remove / restore the jump (install.sh firewall off|on)
+//   php pspm-agent.php apt      package status; apt-get update at most once a day (pspm-apt.timer)
 declare(strict_types=1);
 
 const STATE = '/var/lib/pspm/state';
@@ -350,6 +351,8 @@ function sync(): array
     @file_put_contents(AGENT_STATE, json_encode($agentState));
     @chmod(AGENT_STATE, 0600);
     check_updates();
+    // package counts: every hour from the lists as they are (the daily pspm-apt.timer refreshes them)
+    if (!is_file(STATUS . '/apt.json') || time() - (int)filemtime(STATUS . '/apt.json') >= 3600) apt_status(false);
     write_motd();
     return $status;
 }
@@ -375,6 +378,62 @@ function check_updates(): void
         if ($rc2 === 0) $behind = (int)trim($n);
     }
     write_json($f, ['checked' => gmdate('c'), 'behind' => $behind, 'error' => $rc === 0 ? null : trim($err)]);
+}
+
+// ---------------------------------------------------------------- apt
+
+/** Packages that can be upgraded, from the package lists as they are (downloads nothing). */
+function apt_upgradable(): ?array
+{
+    [$rc, $out] = sh(['env', 'LC_ALL=C', 'apt', 'list', '--upgradable']);   // stderr: "no stable CLI" warning
+    return $rc === 0 ? apt_parse($out) : null;
+}
+
+/** The lines of "apt list --upgradable"; the security archive's suites end in -security. */
+function apt_parse(string $out): array
+{
+    $pk = [];
+    foreach (explode("\n", $out) as $l) {
+        // libssl3t64/stable-security,stable 3.5.7-1~deb13u4 amd64 [upgradable from: 3.5.7-1~deb13u3]
+        if (!preg_match('#^([^/\s]+)/(\S+)\s+(\S+)\s+\S+\s+\[upgradable from: ([^\]]+)\]#', $l, $m)) continue;
+        $pk[] = ['name' => $m[1], 'suite' => $m[2], 'to' => $m[3], 'from' => $m[4], 'security' => str_contains($m[2], '-security')];
+    }
+    return $pk;
+}
+
+/**
+ * The package status for the dashboard (status/apt.json). "apt-get update" runs at most once
+ * a day: only when the lists are older than 20 hours (Debian's apt-daily usually refreshes
+ * them already, with the stamp below). Counting reads the lists as they are.
+ */
+function apt_status(bool $update): array
+{
+    $prev = json_decode((string)@file_get_contents(STATUS . '/apt.json'), true) ?: [];
+    $stamp = '/var/lib/apt/periodic/update-success-stamp';   // touched by apt-daily after a good update
+    $last = max((int)@filemtime($stamp), (int)strtotime((string)($prev['last_update'] ?? '')));
+    $st = ['checked' => gmdate('c'), 'last_update' => $last ? gmdate('c', $last) : null, 'update_error' => $prev['update_error'] ?? null,
+        'update_attempt' => $prev['update_attempt'] ?? null];
+    if ($update && time() - $last >= 20 * 3600) {
+        $st['update_attempt'] = gmdate('c');
+        for ($try = 1; $try <= 3; $try++) {   // the lists lock may be held by apt-daily or unattended-upgrades
+            [$rc, , $err] = sh(['timeout', '600', 'env', 'LC_ALL=C', 'DEBIAN_FRONTEND=noninteractive', 'apt-get', '-q', 'update']);
+            if ($rc === 0 || !str_contains($err, 'lock')) break;
+            sleep(60);
+        }
+        if ($rc === 0) { $st['last_update'] = gmdate('c'); $st['update_error'] = null; }
+        else $st['update_error'] = substr(trim($err) ?: "apt-get update: exit $rc", 0, 500);
+    }
+    $pk = apt_upgradable();
+    $reboot = is_file('/run/reboot-required');
+    $st += ['ok' => $pk !== null, 'upgradable' => $pk === null ? null : count($pk),
+        'security' => $pk === null ? null : count(array_filter($pk, fn($p) => $p['security'])),
+        'packages' => array_slice($pk ?? [], 0, 300),
+        'reboot_required' => $reboot,
+        'reboot_packages' => $reboot ? array_values(array_filter(array_map('trim', @file('/run/reboot-required.pkgs') ?: []))) : []];
+    // security updates are installed by unattended-upgrades; note since when some wait
+    $st['security_since'] = $st['security'] ? ($prev['security_since'] ?? gmdate('c')) : null;
+    write_json(STATUS . '/apt.json', $st);
+    return $st;
 }
 
 /** The SSH login message (plan §8.2): instant to print, no DB needed. */
@@ -417,6 +476,9 @@ function write_motd(): void
     }
     $up = json_decode((string)@file_get_contents(STATUS . '/updates.json'), true);
     if (($up['behind'] ?? 0) > 0) $lines[] = "  Updates:  {$up['behind']} new commits, deploy with: sudo " . REPO . '/install.sh update';
+    $apt = json_decode((string)@file_get_contents(STATUS . '/apt.json'), true) ?: [];
+    if (($apt['upgradable'] ?? 0) > 0) $lines[] = "  Packages: {$apt['upgradable']} can be upgraded" . (($apt['security'] ?? 0) > 0 ? " ({$apt['security']} security)" : '') . ': sudo apt upgrade';
+    if (!empty($apt['reboot_required'])) $lines[] = '  Reboot:   required (' . (implode(', ', array_slice($apt['reboot_packages'] ?? [], 0, 3)) ?: 'updated packages') . ')';
     $tmp = STATUS . '/motd.tmp';
     file_put_contents($tmp, implode("\n", $lines) . "\n");
     chmod($tmp, 0644);
@@ -441,6 +503,12 @@ switch ($cmd) {
         $s = sync();
         echo 'sets: ' . json_encode($s['sets']) . "\n";
         break;
+    case 'apt':
+        $s = apt_status(true);
+        echo 'packages: ' . json_encode(['upgradable' => $s['upgradable'], 'security' => $s['security'], 'reboot_required' => $s['reboot_required'],
+            'last_update' => $s['last_update'], 'update_error' => $s['update_error']]) . "\n";
+        if (!$s['ok']) $errors[] = 'apt list --upgradable failed';
+        break;
     case 'off':
         $r = setup_rules(false);
         echo json_encode($r) . "\n";
@@ -451,7 +519,7 @@ switch ($cmd) {
         echo json_encode(setup_rules(true)) . "\n";
         break;
     default:
-        logmsg("usage: pspm-agent.php setup|sync|off|on");
+        logmsg("usage: pspm-agent.php setup|sync|off|on|apt");
         exit(64);
 }
 foreach ($errors as $e) logmsg($e);

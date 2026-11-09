@@ -175,6 +175,40 @@ $up = Status::read('updates');
 $b .= '<div>Code: ' . h(Status::codeCommit()) . (($up['behind'] ?? 0) > 0 ? ', <strong>' . h($up['behind']) . ' updates available</strong>' : '') . '</div>';
 $tiles[] = tile('System', $level, $b);
 
+// Debian packages: the agent counts every hour; apt-get update runs at most once a day (pspm-apt.timer)
+$apt = Status::read('apt');
+if (!$apt) {
+    $tiles[] = tile('Packages', 'grey', '<div>No report yet: the agent counts the upgradable packages every hour.</div>');
+} else {
+    $level = 'green';
+    $b = '';
+    $n = $apt['upgradable'] ?? null;
+    $sec = (int)($apt['security'] ?? 0);
+    if ($n === null) { $level = 'amber'; $b .= '<div>The upgradable packages could not be listed (see the agent log).</div>'; }
+    elseif ($n === 0) $b .= '<div>All packages are up to date.</div>';
+    else {
+        $b .= '<div><strong>' . h($n) . '</strong> can be upgraded' . ($sec ? ', <strong>' . h($sec) . ' security</strong>' : '') . '</div>';
+        $list = array_map(fn($p) => '<li>' . h($p['name']) . ' <span class="text-muted">' . h($p['from']) . ' → ' . h($p['to']) . '</span>'
+            . ($p['security'] ? ' ' . badge('amber', 'security') : '') . '</li>', array_slice($apt['packages'] ?? [], 0, 40));
+        $b .= '<details><summary>Packages</summary><ul class="list-unstyled mb-1">' . implode('', $list) . (count($apt['packages'] ?? []) > 40 ? '<li>…</li>' : '') . '</ul></details>';
+        $b .= '<div class="text-muted">Install with <code>sudo apt upgrade</code>; PSPM never upgrades by itself. Security updates install automatically every day.</div>';
+    }
+    // security updates should be gone within a day (unattended-upgrades)
+    if ($sec && !empty($apt['security_since']) && time() - strtotime($apt['security_since']) > 2 * 86400) {
+        $level = 'amber';
+        $b .= '<div class="text-warning-emphasis">Security updates have been waiting since ' . h(ago($apt['security_since'])) . ': is unattended-upgrades working? (<code>journalctl -u apt-daily-upgrade</code>)</div>';
+    }
+    if (!empty($apt['reboot_required'])) {
+        $level = 'amber';
+        $b .= '<div class="text-warning-emphasis">Reboot required' . (($apt['reboot_packages'] ?? []) ? ' (' . h(implode(', ', array_slice($apt['reboot_packages'], 0, 4))) . ')' : '') . '</div>';
+    }
+    if (!empty($apt['update_error'])) { $level = 'amber'; $b .= '<div class="text-warning-emphasis">apt-get update failed: ' . h(mb_substr($apt['update_error'], 0, 160)) . '</div>'; }
+    $listsAge = !empty($apt['last_update']) ? time() - strtotime($apt['last_update']) : null;
+    if ($listsAge === null || $listsAge > 3 * 86400) $level = 'amber';
+    $b .= '<div class="text-muted">Package lists ' . ($listsAge === null ? 'never refreshed' : 'from ' . h(ago($apt['last_update']))) . ', counted ' . h(ago($apt['checked'] ?? null)) . '</div>';
+    $tiles[] = tile('Packages', $level, $b);
+}
+
 // Recent activity
 $rows = DB::all('SELECT at, actor, action, object FROM audit_log ORDER BY at DESC LIMIT 10');
 $b = '<ul class="list-unstyled mb-0">';

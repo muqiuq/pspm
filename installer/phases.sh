@@ -389,7 +389,7 @@ phase_units() {
     install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy
     install -m 0755 "$PSPM_REPO/systemd/certbot-deploy-hook" /etc/letsencrypt/renewal-hooks/deploy/50-pspm
     run "daemon-reload" systemctl daemon-reload
-    run "enable units" systemctl enable --now pspm-agent.path pspm-agent.timer pspm-secscan.timer pspm-blocklists.timer pspm-notify.timer pspm-backup.timer \
+    run "enable units" systemctl enable --now pspm-agent.path pspm-agent.timer pspm-secscan.timer pspm-blocklists.timer pspm-notify.timer pspm-backup.timer pspm-apt.timer \
         || warn "Could not enable the PSPM timers"
     systemctl enable -q pspm-firewall.service 2>/dev/null || warn "Could not enable pspm-firewall.service"
     systemctl enable -q --now certbot.timer 2>/dev/null || warn "certbot.timer is not active"

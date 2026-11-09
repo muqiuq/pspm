@@ -82,6 +82,18 @@ st=$(runuser -u pspm -- php -r 'require "/srv/pspm/app/current/lib/bootstrap.php
 [[ $st == *'"lines"'* ]] && ok "the scan read the real nginx security log: $st" || bad "scan: $st"
 systemctl is-active -q pspm-secscan.timer pspm-notify.timer pspm-blocklists.timer pspm-backup.timer && ok "timers active" || bad "timers"
 systemctl start pspm-backup.service && ls /var/lib/pspm/backups/nightly-*/db.dump >/dev/null && ok "nightly backup writes a dump" || bad "backup"
+# packages: apt-get update at most once a day, counting from the lists as they are
+systemctl is-active -q pspm-apt.timer && ok "pspm-apt.timer active (daily)" || bad "pspm-apt.timer not active"
+aj=/var/lib/pspm/status/apt.json; af() { jq -r "$1" "$aj"; }
+rm -f "$aj" /var/lib/apt/periodic/update-success-stamp
+php /usr/local/lib/pspm/pspm-agent.php apt >/dev/null 2>&1
+u1=$(af .update_attempt); l1=$(af .last_update); n1=$(af .upgradable)
+[[ $l1 != null && $n1 =~ ^[0-9]+$ ]] && ok "apt: lists refreshed and counted: $n1 upgradable, $(af .security) security" || bad "apt first run: $(jq -c '{last_update, update_error, upgradable}' "$aj")"
+sleep 1; php /usr/local/lib/pspm/pspm-agent.php apt >/dev/null 2>&1
+[[ $(af .update_attempt) == "$u1" && $(af .last_update) == "$l1" ]] && ok "apt: a second run the same day does not run apt-get update again" || bad "apt second run: $u1 → $(af .update_attempt)"
+c1=$(af .checked); touch -d '2 hours ago' "$aj"; sleep 1
+php /usr/local/lib/pspm/pspm-agent.php sync >/dev/null 2>&1
+[[ $(af .checked) != "$c1" && $(af .update_attempt) == "$u1" ]] && ok "apt: the agent recounts after an hour, without apt-get update" || bad "apt recount: checked $c1 → $(af .checked)"
 # the admin host name shared with the sign-in host: one server; the UI keeps the admin access, /oauth2/ is public
 lanip=$(ip -o -4 addr show scope global | awk '$2 !~ /^(docker|br-|veth)/ {sub(/\/.*/, "", $4); print $4; exit}')
 pp adminhost auth.pspm.test >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-admin.out 2>&1; rc=$?

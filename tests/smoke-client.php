@@ -90,6 +90,9 @@ check(str_contains($b, 'sites/app.example.ch.conf'), 'the preview diff lists the
 check($c === 303, 'revision committed');
 [$c, $b] = req('GET', '/');
 check(str_contains($b, 'is ready'), 'the dashboard says the revision is ready');
+[$c, $b] = req('GET', '/');
+check(str_contains($b, '<strong>2</strong> can be upgraded, <strong>1 security</strong>') && str_contains($b, 'Reboot required (linux-image-6.12.117+deb13-amd64)'),
+    'dashboard: packages to upgrade, security ones, reboot required');
 [$c, $b] = req('GET', '/certificates');
 check($c === 200 && str_contains($b, 'Server certificates') && str_contains($b, 'pspm-smoke-pspm-test') && str_contains($b, 'renewal is overdue'),
     'certificates: overview with a Let\'s Encrypt certificate whose renewal is overdue');

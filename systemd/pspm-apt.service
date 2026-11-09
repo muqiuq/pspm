@@ -1,0 +1,12 @@
+[Unit]
+Description=PSPM package status (apt-get update at most once a day, then count the upgradable packages)
+After=network-online.target apt-daily.service
+Wants=network-online.target
+ConditionPathExists=/usr/local/lib/pspm/pspm-agent.php
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php /usr/local/lib/pspm/pspm-agent.php apt
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=30min

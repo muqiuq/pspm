@@ -17,6 +17,13 @@ pw=$(php /src/app/bin/user.php bootstrap | sed -n 's/^PASSWORD=//p')
 d=/etc/letsencrypt/live/pspm-smoke-pspm-test; mkdir -p "$d" "$PSPM_ETC/tls"
 openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=smoke.pspm.test" -addext "subjectAltName=DNS:smoke.pspm.test" -days 20 -keyout "$d/privkey.pem" -out "$d/cert.pem" 2>/dev/null
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=PSPM smoke" -addext "subjectAltName=IP:127.0.0.1" -days 3650 -keyout /dev/null -out "$PSPM_ETC/tls/ip.crt" 2>/dev/null
+# a package report as the agent writes it, for the dashboard tile
+cat >"$PSPM_VAR/status/apt.json" <<JSON
+{"checked": "$(date -u +%FT%TZ)", "last_update": "$(date -u -d '-3 hours' +%FT%TZ)", "update_error": null, "ok": true, "upgradable": 2, "security": 1,
+ "packages": [{"name": "libssl3t64", "suite": "stable-security", "to": "3.5.7-1~deb13u4", "from": "3.5.7-1~deb13u3", "security": true},
+              {"name": "nginx", "suite": "stable", "to": "1.26.3-3+deb13u11", "from": "1.26.3-3+deb13u10", "security": false}],
+ "reboot_required": true, "reboot_packages": ["linux-image-6.12.117+deb13-amd64"], "security_since": "$(date -u +%FT%TZ)"}
+JSON
 php -S 127.0.0.1:8080 /src/app/public/index.php >/tmp/server.log 2>&1 &
 sleep 1
 ADMIN_PW=$pw php /src/tests/smoke-client.php

@@ -111,7 +111,9 @@ $agentCode = 'define("PSPM_AGENT_LIBRARY", true); require ' . var_export(realpat
         "short" => set_script("pspm-block4", ["192.0.2.1/32" => $now + 3600], $now)[1],
         "allow" => set_script("pspm-allow4", ["192.0.2.1/32" => 0], $now),
         "culprit" => restore_culprit("ipset v7.22: Error in line 3: Syntax error: x", $s1),
-        "nolines" => restore_culprit("ipset v7.22: Kernel error", $s1)]);';
+        "nolines" => restore_culprit("ipset v7.22: Kernel error", $s1),
+        "apt" => apt_parse("Listing...\nlibssl3t64/stable-security,stable 3.5.7-1~deb13u4 amd64 [upgradable from: 3.5.7-1~deb13u3]\n"
+            . "nginx/stable 1.26.3-3+deb13u11 amd64 [upgradable from: 1.26.3-3+deb13u10]\n\nWARNING: apt does not have a stable CLI interface.\n")]);';
 $p = proc_open([PHP_BINARY, '-r', $agentCode], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 $agentOut = stream_get_contents($pipes[1]); $agentErr = stream_get_contents($pipes[2]); proc_close($p);
 $ag = json_decode((string)$agentOut, true);
@@ -128,6 +130,9 @@ if (is_array($ag)) {
     ok(!str_contains($ag['allow'][0], 'timeout') && $ag['allow'][1] === false, 'sets without timeout support get no timeout');
     eq($ag['culprit'], ' [entry: 203.0.113.7/32 timeout 2147483]', 'restore error names the entry of its line');
     eq($ag['nolines'], '', 'errors without a line name no entry');
+    eq($ag['apt'], [['name' => 'libssl3t64', 'suite' => 'stable-security,stable', 'to' => '3.5.7-1~deb13u4', 'from' => '3.5.7-1~deb13u3', 'security' => true],
+        ['name' => 'nginx', 'suite' => 'stable', 'to' => '1.26.3-3+deb13u11', 'from' => '1.26.3-3+deb13u10', 'security' => false]],
+        'apt list --upgradable: packages, versions and the security archive');
 }
 
 // Response header buffers: every choice is a combination nginx -t accepts
