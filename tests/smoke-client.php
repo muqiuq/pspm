@@ -90,6 +90,14 @@ check(str_contains($b, 'sites/app.example.ch.conf'), 'the preview diff lists the
 check($c === 303, 'revision committed');
 [$c, $b] = req('GET', '/');
 check(str_contains($b, 'is ready'), 'the dashboard says the revision is ready');
+[$c, $b] = req('GET', '/settings');
+check($c === 200 && str_contains($b, 'applied with install.sh') && str_contains($b, 'takes effect at once') && str_contains($b, 'id="signin-protection"'),
+    'settings: configuration and runtime sections');
+[$c, , $loc] = req('POST', '/settings', ['_csrf' => csrf($b), 'action' => 'runtime', 'max_failures' => '7', 'window_mins' => '15', 'ban_hours' => '2',
+    'traps_enabled' => '1', 'pki_strict' => '1', 'ai_authorised' => '1', 'smtp_port' => '587', 'smtp_security' => 'starttls', 'ai_daily_cap' => '200', 'ai_confidence' => '0.85',
+    'reaction_hours' => '24', 'unknown_threshold' => '5', 'unknown_window' => '60', 'authorised_days' => '30']);
+[, $b] = req('GET', '/settings');
+check($c === 303 && str_contains($b, 'name="max_failures" value="7"') && str_contains($b, 'name="ban_hours" value="2"'), 'settings: sign-in protection is saved with the runtime settings');
 [$c, $b] = req('GET', '/');
 check(str_contains($b, '<strong>2</strong> can be upgraded, <strong>1 security</strong>') && str_contains($b, 'Reboot required (linux-image-6.12.117+deb13-amd64)'),
     'dashboard: packages to upgrade, security ones, reboot required');

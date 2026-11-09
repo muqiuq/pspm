@@ -15,7 +15,7 @@ final class Markdown
             if (preg_match('/^```/', $l)) {
                 $code = [];
                 for ($i++; $i < $n && !preg_match('/^```/', $lines[$i]); $i++) $code[] = $lines[$i];
-                $out .= '<pre class="bg-light p-2 border rounded"><code>' . h(implode("\n", $code)) . "</code></pre>\n";
+                $out .= '<pre class="bg-body-tertiary p-2 border rounded"><code>' . h(implode("\n", $code)) . "</code></pre>\n";
                 $i++;
                 continue;
             }

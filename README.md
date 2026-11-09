@@ -68,4 +68,5 @@ docker run --rm -v "$PWD:/src:ro" pspm-test:trixie php /src/tests/unit/run.php
 docker run --rm -v "$PWD:/src:ro" pspm-test:trixie bash /src/tests/nginx-check.sh
 bash tests/run-smoke.sh                                   # UI, PKI, security, export/import against PostgreSQL 18 and Mailpit
 # end to end in a Debian 13 box with systemd: see tests/docker/systemd and tests/box-e2e.sh
+bash tests/screenshots.sh .tmp/screens /settings /certificates   # light and dark screenshots (Playwright)
 ```

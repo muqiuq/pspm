@@ -25,9 +25,12 @@ function page_start(string $title, string $active = ''): void
     header('Cache-Control: no-store');
     $u = Auth::user();
     $full = Auth::full();
-    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
+    echo '<!doctype html><html lang="en" data-bs-theme="light"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
     echo '<title>' . h($title) . ' · PSPM</title>';
-    echo '<link rel="stylesheet" href="/assets/vendor/bootstrap.min.css"><link rel="stylesheet" href="/assets/pspm.css">';
+    $v = '?v=' . rawurlencode(Status::codeCommit());   // a new release loads new files (assets are cached for an hour)
+    echo '<script src="/assets/theme.js' . $v . '"></script>';   // sets the colour mode before the page paints
+    echo '<meta name="color-scheme" content="light dark">';
+    echo '<link rel="stylesheet" href="/assets/vendor/bootstrap.min.css"><link rel="stylesheet" href="/assets/pspm.css' . $v . '">';
     echo '<link rel="icon" href="/assets/pspm.svg" type="image/svg+xml"></head><body>';
     echo '<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3"><div class="container-fluid">';
     echo '<a class="navbar-brand d-flex align-items-center" href="/"><img src="/assets/pspm.svg" alt="" width="26" height="26" class="me-2">PSPM</a>';
@@ -41,16 +44,30 @@ function page_start(string $title, string $active = ''): void
             $cls = $active === $href ? ' active' : '';
             echo '<li class="nav-item"><a class="nav-link' . $cls . '" href="' . h($href) . '">' . h($label) . $badge . '</a></li>';
         }
-        echo '</ul><ul class="navbar-nav"><li class="nav-item dropdown"><a class="nav-link dropdown-toggle" href="#" data-bs-toggle="dropdown">'
+        echo '</ul><ul class="navbar-nav align-items-lg-center">' . theme_switch() . '<li class="nav-item dropdown"><a class="nav-link dropdown-toggle" href="#" data-bs-toggle="dropdown">'
             . h($u['username']) . ' <span class="badge text-bg-secondary">' . h($u['role']) . '</span></a>'
             . '<ul class="dropdown-menu dropdown-menu-end"><li><a class="dropdown-item" href="/account">Account</a></li>'
             . '<li><a class="dropdown-item" href="/about">About</a></li><li><hr class="dropdown-divider"></li>'
             . '<li><form method="post" action="/logout" class="px-3">' . csrf_field() . '<button class="btn btn-link p-0">Sign out</button></form></li></ul></li></ul></div>';
-    } elseif ($u) {
-        echo '<form method="post" action="/logout" class="ms-auto">' . csrf_field() . '<button class="btn btn-sm btn-outline-light">Sign out</button></form>';
+    } else {
+        echo '<ul class="navbar-nav ms-auto flex-row align-items-center">' . theme_switch();
+        if ($u) echo '<li class="nav-item ms-2"><form method="post" action="/logout">' . csrf_field() . '<button class="btn btn-sm btn-outline-light">Sign out</button></form></li>';
+        echo '</ul>';
     }
     echo '</div></nav><main class="container-fluid pb-5">';
     flash_render();
+}
+
+/** Light / dark / auto switch for the navigation bar (theme.js applies it, pspm.js wires the buttons). */
+function theme_switch(): string
+{
+    $items = '';
+    foreach (['auto' => 'Auto (like the system)', 'light' => 'Light', 'dark' => 'Dark'] as $k => $label) {
+        $items .= '<li><button class="dropdown-item" type="button" data-theme-set="' . $k . '">' . h($label) . '</button></li>';
+    }
+    return '<li class="nav-item dropdown me-lg-2"><button class="nav-link dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false"'
+        . ' title="Colour mode" aria-label="Colour mode"><span aria-hidden="true">◐</span><span class="d-lg-none ms-1">Colour mode</span></button>'
+        . '<ul class="dropdown-menu dropdown-menu-end">' . $items . '</ul></li>';
 }
 
 /** Extra script files for this page (loaded before pspm.js). */
@@ -63,7 +80,7 @@ function page_end(): void
 {
     echo '</main><script src="/assets/vendor/bootstrap.bundle.min.js"></script>';
     foreach ($GLOBALS['pspm_js'] ?? [] as $src) echo '<script src="' . h($src) . '"></script>';
-    echo '<script src="/assets/pspm.js"></script></body></html>';
+    echo '<script src="/assets/pspm.js?v=' . rawurlencode(Status::codeCommit()) . '"></script></body></html>';
     exit;
 }
 

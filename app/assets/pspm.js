@@ -49,6 +49,21 @@
     }
   });
 
+  // Colour mode switch (theme.js keeps the choice and applies it).
+  function markTheme() {
+    var c = window.pspmTheme ? window.pspmTheme.choice() : 'auto';
+    document.querySelectorAll('[data-theme-set]').forEach(function (b) {
+      var on = b.getAttribute('data-theme-set') === c;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-theme-set]');
+    if (b && window.pspmTheme) { window.pspmTheme.set(b.getAttribute('data-theme-set')); markTheme(); }
+  });
+  markTheme();
+
   // Confirmation for dangerous buttons: <form data-confirm="…">.
   document.addEventListener('submit', function (e) {
     var f = e.target;
