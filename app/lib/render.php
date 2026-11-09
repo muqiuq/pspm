@@ -498,10 +498,17 @@ final class Renderer
         return null;
     }
 
-    /** /oauth2/* to a provider's oauth2-proxy: public, the sign-in pages and callbacks (plan §12.3). */
+    /**
+     * /oauth2/* to a provider's oauth2-proxy: public, the sign-in pages and callbacks (plan §12.3).
+     * The gate does not run here: it strips the _pspm_ cookies (they must never reach a backend),
+     * but these are oauth2-proxy's own (CSRF at the callback, the session at sign-out). On a host
+     * shared with the admin UI, the server's gate would otherwise lose the CSRF cookie (403).
+     * block.lua (rewrite phase) still refuses blocked addresses.
+     */
     private function oauth2Location(array $p): string
     {
-        return "    location /oauth2/ {\n        set \$pspm_allow public;\n        limit_req zone=pspm_signin burst=120 nodelay;\n        proxy_pass http://127.0.0.1:{$p['port']};\n"
+        return "    location /oauth2/ {\n        set \$pspm_allow public;\n        access_by_lua_block { return }   # no gate: oauth2-proxy needs its _pspm_ cookies\n"
+            . "        limit_req zone=pspm_signin burst=120 nodelay;\n        proxy_pass http://127.0.0.1:{$p['port']};\n"
             . "        proxy_set_header Host \$host;\n        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$remote_addr;\n"
             . "        proxy_set_header X-Forwarded-Proto https;\n        proxy_set_header X-Forwarded-Host \$host;\n        proxy_set_header X-Scheme https;\n"
             . self::bufferLines('        ', 128) . "        proxy_connect_timeout 5s;\n        proxy_read_timeout 30s;\n    }\n";

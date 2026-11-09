@@ -165,6 +165,9 @@ eq(count($tlsServers), 1, 'shared host: exactly one 443 server for the name');
 ok((bool)preg_match('#server_name ' . preg_quote($hn, '#') . ';.*?set \$pspm_allow lan,cert;.*?location /oauth2/ \{\n        set \$pspm_allow public;.*?include conf/ui\.conf;#s', $rs['files']['conf/system.conf']),
     'shared host: the UI keeps the admin access, /oauth2/ is public');
 eq($rs['summary']['admin']['cert'], 'pspm-signin-peeeeeeee', 'shared host: the sign-in host certificate is used and recorded');
+foreach (['conf/system.conf' => $rs['files']['conf/system.conf'], 'conf/signin.conf' => $f['conf/signin.conf']] as $fn => $txt) {
+    ok((bool)preg_match('#location /oauth2/ \{\n        set \$pspm_allow public;\n        access_by_lua_block \{ return \}#', $txt), "$fn: no gate on /oauth2/ (it would strip oauth2-proxy's own cookies)");
+}
 eq($rs['summary']['admin']['signin'], $doc['providers'][0]['id'], 'shared host: summary names the provider');
 $two = $doc; $p2 = $doc['providers'][0]; $p2['id'] = 'ffffffff-ffff-4fff-8fff-ffffffffffff'; $p2['name'] = 'Second'; $p2['port'] = 4182; $two['providers'][] = $p2;
 ok((bool)array_filter(Model::checkDocument($two), fn($e) => str_contains($e, 'used by two providers')), 'two providers with one sign-in host are refused');

@@ -56,6 +56,16 @@ t3=$(tmo pspm-allowweb4 203.0.113.7)
 [[ -n $t3 && $t3 -gt $t2 ]] && ok "past its reload deadline the set is reloaded ($t2 → $t3)" || bad "no reload at the deadline: $t2 → $t3"
 jq -e '.errors == [] and .sets["pspm-allowweb4"] >= 1 and .sets["pspm-block4"] >= 1' /var/lib/pspm/status/firewall.json >/dev/null \
     && ok "firewall status: no errors" || bad "firewall status: $(jq -c '{sets, errors}' /var/lib/pspm/status/firewall.json)"
+# start → callback round trip: oauth2-proxy must get back the CSRF cookie it set at /oauth2/start.
+# With it, the fake code fails at Microsoft (500); without it, oauth2-proxy answers 403.
+cb() {
+    local jar=/tmp/cb.jar loc state
+    rm -f "$jar"
+    loc=$(curl -sk -c "$jar" -o /dev/null -w '%{redirect_url}' --resolve "auth.pspm.test:443:$1" 'https://auth.pspm.test/oauth2/start?rd=https%3A%2F%2Fsso.pspm.test%2F')
+    state=$(sed -n 's/.*[?&]state=\([^&]*\).*/\1/p' <<<"$loc")
+    curl -sk -b "$jar" -o /dev/null -w '%{http_code}' --resolve "auth.pspm.test:443:$1" "https://auth.pspm.test/oauth2/callback?code=e2e-fake&state=$state"
+}
+c=$(cb 127.0.0.1); [[ $c == 500 ]] && ok "sign-in host: the callback gets the CSRF cookie (fake code refused by Microsoft: $c)" || bad "sign-in host callback: $c (403 = CSRF cookie lost)"
 pp blocklist >/dev/null
 php /usr/local/lib/pspm/pspm-agent.php sync >/dev/null
 n=$(ipset list pspm-feed4 | sed -n '/^Members:/,$p' | grep -c timeout)
@@ -76,6 +86,7 @@ c=$(curl -sk -o /dev/null -w '%{http_code}' --resolve auth.pspm.test:443:127.0.0
 [[ $c == 403 ]] && ok "shared host: the UI refuses a non-LAN address: $c" || bad "shared host UI from 127.0.0.1: $c"
 loc=$(curl -sk -o /dev/null -w '%{http_code} %{redirect_url}' --resolve auth.pspm.test:443:127.0.0.1 'https://auth.pspm.test/oauth2/start?rd=https%3A%2F%2Fsso.pspm.test%2F')
 [[ $loc == "302 https://login.microsoftonline.com/"* ]] && ok "shared host: /oauth2/ is public and hands over to Microsoft" || bad "shared host /oauth2/: $loc"
+c=$(cb 127.0.0.1); [[ $c == 500 ]] && ok "shared host: the callback gets the CSRF cookie (fake code refused by Microsoft: $c)" || bad "shared host callback: $c (403 = CSRF cookie lost)"
 # a release in which two servers answer one name is refused (nginx -t only warns)
 dupdir=/tmp/dup-release; rm -rf "$dupdir"; cp -a "$(readlink -f /etc/pspm/nginx/current)" "$dupdir"
 printf 'server {\n    listen 80;\n    server_name cert.pspm.test;\n    return 404;\n}\n' >> "$dupdir/conf/signin.conf"
