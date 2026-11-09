@@ -68,7 +68,8 @@ final class Access
             return [false, 'This link is not valid (any more).', null];
         }
         $cidr = IP::clientCidr($ip);
-        DB::tx(function () use ($l, $cidr) {
+        $days = (int)(Settings::get('trust', [])['authorised_days'] ?? 30);
+        DB::tx(function () use ($l, $cidr, $days) {
             DB::q('UPDATE access_links SET uses = uses + 1, last_used_at = now() WHERE id = ?', [$l['id']]);
             DB::q('INSERT INTO cleared_ips (site_id, ip, link_id, expires_at)
                    VALUES (?, ?::cidr, ?, CASE WHEN ?::int IS NULL THEN NULL ELSE now() + make_interval(secs => ?::int) END)
@@ -76,10 +77,11 @@ final class Access
                 [$l['site_id'], $cidr, $l['id'], $l['grant_secs'], $l['grant_secs']]);
             if (!IP::isPrivate(explode('/', $cidr)[0])) {
                 DB::q("INSERT INTO trusted_ips (ip, kind, source, last_seen, expires_at)
-                       VALUES (?::cidr, 'authorised', ?, now(), now() + interval '30 days')
+                       VALUES (?::cidr, 'authorised', ?, now(), now() + make_interval(days => ?))
                        ON CONFLICT (ip) DO UPDATE SET last_seen = now(),
-                         expires_at = greatest(trusted_ips.expires_at, excluded.expires_at)",
-                    [$cidr, 'link:' . $l['id']]);
+                         expires_at = CASE WHEN trusted_ips.kind = 'trusted' THEN trusted_ips.expires_at
+                                           ELSE greatest(trusted_ips.expires_at, excluded.expires_at) END",
+                    [$cidr, 'link:' . $l['id'], $days]);
             }
         });
         putenv('PSPM_ACTOR=link:' . $l['label']);

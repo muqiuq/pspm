@@ -194,7 +194,7 @@ apply_configuration() {
     record_apply "$rev_id" "$rel" "$manifest_sha" "$result" "" "$started"
     jq -r '.webports | map(tostring) | join("\n")' "$NGX/current/summary.json" >"$ETC/webports" 2>/dev/null
     run_quiet "publish state" as_pspm php "$app/bin/state.php" || true
-    run_quiet "agent sync" php "$LIBDIR/pspm-agent.php" sync || true
+    agent_sync "agent sync" || true
     prune_releases
     APPLY_RESULT="revision $rev_id is live as $rel"
     ok "Revision $rev_id is live"

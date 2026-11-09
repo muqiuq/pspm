@@ -35,6 +35,14 @@ if ($step === 'setup') {
 } elseif ($step === 'revoke') {
     PKI::revoke((string)DB::val("SELECT id FROM client_certs WHERE subject_cn = 'anna@pspm.test' AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1"), 'e2e');
     echo "revoked\n";
+} elseif ($step === 'longterm') {
+    // 30 days is longer than the kernel's ipset limit (24.8 days): an authorised address
+    // (allow-web set) and an escalated firewall block (block set)
+    DB::q("INSERT INTO trusted_ips (ip, kind, source, last_seen, expires_at) VALUES ('203.0.113.7/32', 'authorised', 'e2e', now(), now() + interval '30 days')
+           ON CONFLICT (ip) DO UPDATE SET expires_at = excluded.expires_at");
+    Blocks::add('192.0.2.77', 'manual', 'e2e: 30-day block', 30 * 86400, true, 'box-e2e');
+    State::publish('trusted', 'blocked');
+    echo "30-day entries published\n";
 } elseif ($step === 'blocklist') {
     $id = Crypto::uuid();
     DB::q("INSERT INTO blocklists (id, name, url, format, mode, enabled, last_ok_at) VALUES (?, 'e2e', 'https://example.test/list', 'plain', 'block', true, now())", [$id]);

@@ -29,6 +29,22 @@ code=$(curl -sk -o /dev/null -w '%{http_code}' -H 'Accept: application/json' --r
 [[ $code == 401 ]] && ok "sign-in required: an API client gets 401" || bad "API client: $code"
 loc=$(curl -sk -o /dev/null -w '%{http_code} %{redirect_url}' --resolve auth.pspm.test:443:127.0.0.1 'https://auth.pspm.test/oauth2/start?rd=https%3A%2F%2Fsso.pspm.test%2F')
 [[ $loc == "302 https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/"* ]] && ok "the sign-in host hands over to Microsoft (with PKCE)" || bad "sign-in host: $loc"
+# entries longer than the kernel's ipset limit are capped, and the set is reloaded before the cap runs out
+tmo() { ipset list "$1" | awk -v ip="$2" '$1 == ip {print $3}'; }
+pp longterm >/dev/null
+php /usr/local/lib/pspm/pspm-agent.php sync >/dev/null 2>/root/agent-e2e.err && ok "agent sync with 30-day entries: exit 0" || bad "agent sync with 30-day entries: $(cat /root/agent-e2e.err)"
+t1=$(tmo pspm-allowweb4 203.0.113.7); b1=$(tmo pspm-block4 192.0.2.77)
+[[ -n $t1 && $t1 -le 2147483 && $t1 -gt 2147000 ]] && ok "30-day authorisation in the allow-web set, capped: timeout $t1" || bad "allow-web timeout: '${t1}'"
+[[ -n $b1 && $b1 -le 2147483 && $b1 -gt 2147000 ]] && ok "30-day block in the block set, capped: timeout $b1" || bad "block timeout: '${b1}'"
+sleep 3; php /usr/local/lib/pspm/pspm-agent.php sync >/dev/null 2>&1
+t2=$(tmo pspm-allowweb4 203.0.113.7)
+[[ -n $t2 && $t2 -lt $t1 ]] && ok "unchanged set is not reloaded before its deadline ($t1 → $t2)" || bad "unexpected reload: $t1 → $t2"
+jq '.reload["pspm-allowweb4"] = 0' /var/lib/pspm/agent-state.json > /root/agent-state.json && cat /root/agent-state.json > /var/lib/pspm/agent-state.json
+php /usr/local/lib/pspm/pspm-agent.php sync >/dev/null 2>&1
+t3=$(tmo pspm-allowweb4 203.0.113.7)
+[[ -n $t3 && $t3 -gt $t2 ]] && ok "past its reload deadline the set is reloaded ($t2 → $t3)" || bad "no reload at the deadline: $t2 → $t3"
+jq -e '.errors == [] and .sets["pspm-allowweb4"] >= 1 and .sets["pspm-block4"] >= 1' /var/lib/pspm/status/firewall.json >/dev/null \
+    && ok "firewall status: no errors" || bad "firewall status: $(jq -c '{sets, errors}' /var/lib/pspm/status/firewall.json)"
 pp blocklist >/dev/null
 php /usr/local/lib/pspm/pspm-agent.php sync >/dev/null
 n=$(ipset list pspm-feed4 | sed -n '/^Members:/,$p' | grep -c timeout)

@@ -22,6 +22,21 @@ final class Status
         return is_file($f) ? time() - (int)filemtime($f) : null;
     }
 
+    /** What the agent's last firewall report says is wrong, in one sentence; null when nothing is. */
+    public static function firewallProblem(?array $fw): ?string
+    {
+        if (!$fw) return null;
+        $errors = array_values(array_filter((array)($fw['errors'] ?? []), 'is_string'));
+        $failed = array_keys(array_filter((array)($fw['sets'] ?? []), fn($n) => $n === -1));
+        $broken = array_keys(array_filter((array)($fw['rules'] ?? []), fn($s) => $s === 'error'));
+        if (!$errors && !$failed && !$broken) return null;
+        $first = $errors ? mb_substr($errors[0], 0, 300) . (count($errors) > 1 ? ' (and ' . (count($errors) - 1) . ' more)' : '') : '';
+        if ($broken) return 'The firewall chain could not be set up (' . implode(', ', $broken) . '): ' . $first . ' nginx still blocks.';
+        if ($failed) return 'The firewall works, but ' . (count($failed) === 1 ? 'set ' : 'sets ') . implode(', ', $failed)
+            . ' could not be loaded: ' . $first . ' (sudo journalctl -u pspm-agent)';
+        return "The firewall agent reports: $first";
+    }
+
     public static function unitActive(string $unit): ?bool
     {
         if (!is_executable('/usr/bin/systemctl')) return null;

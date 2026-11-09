@@ -89,9 +89,12 @@ $tiles[] = tile('Access', 'green', "<div>$cleared cleared addresses</div><div>$u
 $blocks = (int)DB::val('SELECT count(*) FROM blocks WHERE expires_at > now()');
 $fw = Status::read('firewall');
 $b = "<div>$blocks active in nginx</div>";
-if ($fw) $b .= '<div>' . h($fw['sets']['pspm-block4'] ?? 0) . ' + ' . h($fw['sets']['pspm-block6'] ?? 0) . ' in the firewall</div>';
+$fwProblem = Status::firewallProblem($fw);
+$fwCount = fn(string $s) => ($n = $fw['sets'][$s] ?? 0) === -1 ? 'not loaded' : (string)$n;
+if ($fw) $b .= '<div>' . h($fwCount('pspm-block4')) . ' + ' . h($fwCount('pspm-block6')) . ' in the firewall</div>';
 else $b .= '<div>Firewall state: no report from the agent yet</div>';
-$tiles[] = tile('Blocks', $fw ? 'green' : 'grey', $b);
+if ($fwProblem) $b .= '<div class="text-danger small">' . h($fwProblem) . '</div>';
+$tiles[] = tile('Blocks', $fwProblem ? 'red' : ($fw ? 'green' : 'grey'), $b);
 
 // Blocklists
 $lists = DB::all('SELECT name, mode, enabled, last_status FROM blocklists WHERE enabled');

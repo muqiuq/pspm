@@ -18,6 +18,11 @@ const AGENT_STATE = '/var/lib/pspm/agent-state.json';
 const CHAIN = 'PSPM-INPUT';
 const NEVER_BLOCKED = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '::1/128', 'fc00::/7', 'fe80::/10'];
 const PEER_GRACE = 3600;
+// The kernel refuses ipset timeouts above UINT_MAX/2 milliseconds (about 24.8 days). Longer
+// entries (30-day authorisations and blocks) are loaded with this cap, and their set is
+// reloaded a day before the capped timeout runs out (load_set).
+const IPSET_MAX_TIMEOUT = 2147483;
+const RELOAD_MARGIN = 86400;
 
 const SETS = [
     'pspm-allow4'    => ['hash:net', 'inet', 0, 65536],
@@ -201,7 +206,41 @@ function setup_rules(bool $jump): array
     return $state;
 }
 
-/** Replace a set's content atomically (build, swap, destroy). Skipped when unchanged. */
+/** Seconds until an entry expiring at $exp runs out in the kernel (0 = permanent), capped at the ipset limit. */
+function ipset_timeout(int $exp, int $now): int
+{
+    return $exp === 0 ? 0 : min(IPSET_MAX_TIMEOUT, max(1, $exp - $now));
+}
+
+/** The restore script for a set; the second value is true when a timeout had to be capped. */
+function set_script(string $name, array $entries, int $now): array
+{
+    $tmp = $name . '-tmp';
+    $script = 'create ' . implode(' ', set_create_args($name, $tmp)) . "\nflush $tmp\n";
+    $capped = false;
+    foreach ($entries as $e => $exp) {
+        $t = '';
+        if (SETS[$name][2] !== 0) {                   // only sets with timeout support
+            $t = ' timeout ' . ipset_timeout($exp, $now);
+            $capped = $capped || ($exp !== 0 && $exp - $now > IPSET_MAX_TIMEOUT);
+        }
+        $script .= "add $tmp $e$t\n";
+    }
+    return [$script . "swap $tmp $name\ndestroy $tmp\n", $capped];
+}
+
+/** The entry an "Error in line N" of ipset restore refers to (line 1 create, 2 flush, then the entries). */
+function restore_culprit(string $err, string $script): string
+{
+    if (!preg_match('/Error in line (\d+)/', $err, $m)) return '';
+    $line = explode("\n", $script)[(int)$m[1] - 1] ?? '';
+    return str_starts_with($line, 'add ') ? ' [entry: ' . substr($line, strpos($line, ' ', 4) + 1) . ']' : '';
+}
+
+/**
+ * Replace a set's content atomically (build, swap, destroy). Skipped when the content is
+ * unchanged, unless a capped timeout is about to run out (reload deadline in the agent state).
+ */
 function load_set(string $name, array $entries, array &$agentState): int
 {
     global $errors;
@@ -211,26 +250,23 @@ function load_set(string $name, array $entries, array &$agentState): int
         $errors[] = "$name: " . count($entries) . " entries, capped at $max";
         $entries = array_slice($entries, 0, $max, true);
     }
+    $now = time();
     $hash = hash('sha256', json_encode($entries));
+    $due = $agentState['reload'][$name] ?? null;
     [$rc] = sh(['ipset', '-n', 'list', $name]);
-    if ($rc === 0 && ($agentState['hash'][$name] ?? '') === $hash) return count($entries);
+    if ($rc === 0 && ($agentState['hash'][$name] ?? '') === $hash && ($due === null || $now < $due)) return count($entries);
     $tmp = $name . '-tmp';
     sh(['ipset', 'destroy', $tmp]);   // left over from an interrupted run
-    $script = 'create ' . implode(' ', set_create_args($name, $tmp)) . "\nflush $tmp\n";
-    $now = time();
-    foreach ($entries as $e => $exp) {
-        $t = $exp === 0 ? ' timeout 0' : ' timeout ' . max(1, $exp - $now);   // 0 = permanent
-        if (SETS[$name][2] === 0) $t = '';            // sets without timeout support
-        $script .= "add $tmp $e$t\n";
-    }
-    $script .= "swap $tmp $name\ndestroy $tmp\n";
+    [$script, $capped] = set_script($name, $entries, $now);
     [$rc, , $err] = sh(['ipset', '-exist', 'restore'], $script);
     if ($rc !== 0) {
-        $errors[] = "ipset restore $name: " . trim($err);
+        $errors[] = "ipset restore $name: " . trim($err) . restore_culprit($err, $script) . '; the set keeps its previous content';
         sh(['ipset', 'destroy', $tmp]);
         return -1;
     }
     $agentState['hash'][$name] = $hash;
+    if ($capped) $agentState['reload'][$name] = $now + IPSET_MAX_TIMEOUT - RELOAD_MARGIN;
+    else unset($agentState['reload'][$name]);
     return count($entries);
 }
 
@@ -389,6 +425,7 @@ function write_motd(): void
 
 // ---------------------------------------------------------------- main
 
+if (defined('PSPM_AGENT_LIBRARY')) return;   // tests load the functions only
 if (posix_geteuid() !== 0) { logmsg('must run as root'); exit(1); }
 @mkdir(STATUS, 0750, true);
 $cmd = $argv[1] ?? 'sync';

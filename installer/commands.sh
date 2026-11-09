@@ -17,6 +17,8 @@ cmd_status() {
     done
     printf '  postgres:        %s\n' "$(docker inspect -f '{{.State.Health.Status}}' pspm-postgres 2>/dev/null || echo 'not running')"
     printf '  firewall:        %s\n' "$(iptables -C INPUT -j PSPM-INPUT 2>/dev/null && echo 'active' || echo 'not active')"
+    local fwp; fwp=$(firewall_problem)
+    [[ -n $fwp ]] && printf '                   %s\n' "$fwp"
     if [[ -f $sum && "$(jq -r .admin.in_effect "$sum")" == true ]]; then
         printf '  UI:              https://%s/\n' "$(jq -r .admin.host "$sum")"
     else
@@ -57,6 +59,7 @@ cmd_doctor() {
     done
     DOCTOR_HINT="install.sh firewall on"; check "firewall chain PSPM-INPUT is the first rule of INPUT" warn sh -c 'iptables -S INPUT | sed -n 2p | grep -q -- "-j PSPM-INPUT"'
     DOCTOR_HINT="Docker and PSPM must use the same iptables backend"; check "iptables uses nf_tables" warn sh -c 'iptables --version | grep -q nf_tables'
+    DOCTOR_HINT=$(firewall_problem); check "the firewall agent reports no errors" warn test -z "$DOCTOR_HINT"
     DOCTOR_HINT="systemctl status pspm-agent"; check "agent heartbeat younger than 5 minutes" warn sh -c "[ \$(( \$(date +%s) - \$(stat -c %Y $STATUS/firewall.json) )) -lt 300 ]"
     DOCTOR_HINT="timedatectl"; check "the clock is synchronised" warn sh -c '[ "$(timedatectl show -p NTPSynchronized --value)" = yes ]'
     DOCTOR_HINT="free some space"; check "more than 2 GB free on /var" warn sh -c '[ $(df -Pk /var | awk "NR==2 {print \$4}") -gt 2097152 ]'

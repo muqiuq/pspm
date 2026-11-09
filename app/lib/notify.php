@@ -171,6 +171,7 @@ final class Notify
         $fw = Status::read('firewall');
         $age = Status::age('firewall');
         $checks['agent'] = $age === null || $age > 300 ? ['red', 'The PSPM agent has not reported for ' . ($age === null ? 'ever' : human_secs($age)) . ' (systemctl status pspm-agent).'] : null;
+        $checks['firewall'] = ($p = Status::firewallProblem($fw)) ? ['red', $p] : null;
         $disk = Status::diskFree('/var');
         $checks['disk'] = $disk && $disk['pct_used'] > 90 ? ['red', "The disk is {$disk['pct_used']}% full."] : null;
         $drift = array_filter(Live::currentRelease() ? Live::drift() : [], fn($d) => in_array($d['level'], ['red', 'amber'], true) && $d['check'] !== 'loaded');

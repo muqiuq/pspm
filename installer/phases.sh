@@ -424,12 +424,16 @@ phase_firewall() {
     if ! iptables --version 2>/dev/null | grep -q nf_tables; then
         warn "iptables does not use the nf_tables backend ($(iptables --version 2>/dev/null)); Docker and PSPM must use the same one."
     fi
-    if run "firewall setup" php "$LIBDIR/pspm-agent.php" setup && run "firewall sync" php "$LIBDIR/pspm-agent.php" sync; then
-        ok "Chain PSPM-INPUT and its sets are in place; $(jq -r '[.sets[]?] | add // 0' "$STATUS/firewall.json" 2>/dev/null) entries loaded"
-        phase_end ok
-    else
+    if ! run "firewall setup" php "$LIBDIR/pspm-agent.php" setup; then
         warn "The firewall layer could not be set up (see log). nginx still blocks."
         phase_end warn "firewall not active"
+    elif ! agent_sync "firewall sync"; then
+        # the chain and jump are in place; name what is missing instead of "not active"
+        phase_end warn "$(jq -r '[.sets // {} | to_entries[] | select(.value == -1) | .key]
+            | if length > 0 then "active; not loaded: " + join(", ") else "active, with errors" end' "$STATUS/firewall.json" 2>/dev/null || echo "see log")"
+    else
+        ok "Chain PSPM-INPUT and its sets are in place; $(jq -r '[.sets[]? | select(. > 0)] | add // 0' "$STATUS/firewall.json" 2>/dev/null) entries loaded"
+        phase_end ok
     fi
 }
 
@@ -567,6 +571,6 @@ phase_report() {
     fi
     info "Tunnel:  ssh -L 9443:127.0.0.1:9443 ${SUDO_USER:-root}@$(hostname -f 2>/dev/null || hostname)   then https://localhost:9443/"
     info "IP certificate SHA-256: $fp"
-    run_quiet "agent refresh" php "$LIBDIR/pspm-agent.php" sync || true
+    agent_sync "agent refresh" || true
     phase_end ok
 }

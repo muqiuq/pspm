@@ -98,5 +98,41 @@ eq(Diff::unified("x\n", "x\n"), '', 'equal texts no diff');
 $bad = $doc; $bad['sites'][0]['routes'][0]['paths'] = ['/a;b'];
 ok((new Renderer(['id' => 2, 'document' => $bad], $facts))->render()['errors'] !== [], 'invalid path refused by the renderer');
 
+// Agent (separate process: its function names clash with the app's): ipset timeouts are
+// capped at the kernel limit, capped sets are flagged for a reload, errors name the entry
+$agentCode = 'define("PSPM_AGENT_LIBRARY", true); require ' . var_export(realpath(__DIR__ . '/../../agent/pspm-agent.php'), true) . ';
+    $now = 1700000000; $d30 = $now + 30 * 86400;
+    [$s1, $c1] = set_script("pspm-allowweb4", ["203.0.113.7/32" => $d30, "198.51.100.0/24" => $now + 3600], $now);
+    echo json_encode(["t30" => ipset_timeout($d30, $now), "t1h" => ipset_timeout($now + 3600, $now), "perm" => ipset_timeout(0, $now),
+        "past" => ipset_timeout($now - 5, $now), "script" => $s1, "capped" => $c1,
+        "short" => set_script("pspm-block4", ["192.0.2.1/32" => $now + 3600], $now)[1],
+        "allow" => set_script("pspm-allow4", ["192.0.2.1/32" => 0], $now),
+        "culprit" => restore_culprit("ipset v7.22: Error in line 3: Syntax error: x", $s1),
+        "nolines" => restore_culprit("ipset v7.22: Kernel error", $s1)]);';
+$p = proc_open([PHP_BINARY, '-r', $agentCode], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+$agentOut = stream_get_contents($pipes[1]); $agentErr = stream_get_contents($pipes[2]); proc_close($p);
+$ag = json_decode((string)$agentOut, true);
+ok(is_array($ag), 'agent loads as a library' . ($ag ? '' : ": $agentErr$agentOut"));
+if (is_array($ag)) {
+    eq($ag['t30'], 2147483, '30-day timeout capped at the ipset limit');
+    eq($ag['t1h'], 3600, 'short timeout unchanged');
+    eq($ag['perm'], 0, 'permanent entry stays 0');
+    eq($ag['past'], 1, 'expired entry gets the minimum timeout');
+    ok(str_contains($ag['script'], "add pspm-allowweb4-tmp 203.0.113.7/32 timeout 2147483\n"), 'capped entry in the restore script');
+    preg_match_all('/timeout (\d+)/', $ag['script'], $tm);
+    ok(max(array_map('intval', $tm[1])) <= 2147483, 'no timeout above the limit in the script');
+    ok($ag['capped'] === true && $ag['short'] === false, 'only sets with capped entries are flagged for a reload');
+    ok(!str_contains($ag['allow'][0], 'timeout') && $ag['allow'][1] === false, 'sets without timeout support get no timeout');
+    eq($ag['culprit'], ' [entry: 203.0.113.7/32 timeout 2147483]', 'restore error names the entry of its line');
+    eq($ag['nolines'], '', 'errors without a line name no entry');
+}
+
+// Firewall problem summary (dashboard, health mail)
+eq(Status::firewallProblem(['sets' => ['pspm-block4' => 3], 'errors' => [], 'rules' => ['chain4' => 'ok']]), null, 'no firewall problem');
+ok(str_starts_with((string)Status::firewallProblem(['sets' => ['pspm-allowweb4' => -1, 'pspm-block4' => 1], 'errors' => ['ipset restore pspm-allowweb4: x'], 'rules' => ['chain4' => 'ok']]),
+    'The firewall works, but set pspm-allowweb4 could not be loaded'), 'failed set named');
+ok(str_starts_with((string)Status::firewallProblem(['sets' => [], 'errors' => ['iptables-restore: y'], 'rules' => ['chain4' => 'error']]),
+    'The firewall chain could not be set up (chain4)'), 'broken chain named');
+
 echo "$n checks, $fails failed\n";
 exit($fails ? 1 : 0);

@@ -88,6 +88,33 @@ ip_cert_fingerprint() {
 
 json_get() { jq -r "$2" "$1" 2>/dev/null; }
 
+# What the agent's last report says is wrong with the firewall, in one line (empty when
+# nothing is). Same wording as Status::firewallProblem in the UI.
+firewall_problem() {
+    jq -r '
+      ([.rules // {} | to_entries[] | select(.value == "error") | .key]) as $broken
+      | ([.sets // {} | to_entries[] | select(.value == -1) | .key]) as $failed
+      | (.errors // []) as $e
+      | (($e[0] // "see the log") + (if ($e | length) > 1 then " (and \(($e | length) - 1) more)" else "" end)) as $first
+      | if ($broken | length) > 0 then "The firewall chain could not be set up (\($broken | join(", "))): \($first) nginx still blocks."
+        elif ($failed | length) > 0 then "The firewall works, but \(if ($failed | length) == 1 then "set" else "sets" end) \($failed | join(", ")) could not be loaded: \($first)"
+        elif ($e | length) > 0 then "The firewall agent reports: \($first)"
+        else empty end' "$STATUS/firewall.json" 2>/dev/null
+}
+
+# agent_sync "description": runs the agent sync. A failure becomes one warning that says
+# what failed; the same problem is warned about once per run (timeouts in the message
+# change every second, so digits are ignored when comparing).
+agent_sync() {
+    local desc=$1 msg w
+    run_quiet "$desc" php "$LIBDIR/pspm-agent.php" sync && return 0
+    msg=$(firewall_problem)
+    msg=${msg:-"The firewall agent failed (see log)."}
+    for w in "${WARNINGS[@]}"; do [[ ${w//[0-9]/} == "${msg//[0-9]/}" ]] && return 1; done
+    warn "$msg"
+    return 1
+}
+
 confirm() {
     local prompt=$1 answer
     [[ ${ASSUME_YES:-0} == 1 ]] && return 0
