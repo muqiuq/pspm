@@ -132,7 +132,11 @@ foreach ($ns as $id => $s) {
 }
 $og = $old['global'] ?? []; $ng = $new['global'] ?? [];
 foreach ($ng as $k => $v) if (($og[$k] ?? null) !== $v) $lines[] = "~ setting $k";
-if (($og['admin_host'] ?? '') !== ($ng['admin_host'] ?? '')) $opens[] = 'admin host name: ' . (($ng['admin_host'] ?? '') ?: '(none: the UI answers by IP to private addresses)');
+if (($og['admin_host'] ?? '') !== ($ng['admin_host'] ?? '')) {
+    $sharedWith = array_values(array_filter($np, fn($p) => ($ng['admin_host'] ?? '') !== '' && $p['signin_host'] === $ng['admin_host']));
+    $opens[] = 'admin host name: ' . (($ng['admin_host'] ?? '') ?: '(none: the UI answers by IP to private addresses)')
+        . ($sharedWith ? " (also the sign-in host of {$sharedWith[0]['name']}: /oauth2/ there stays public, the UI keeps the admin access)" : '');
+}
 if (array_diff($ng['admin_access'] ?? [], $og['admin_access'] ?? [])) $opens[] = 'admin UI reachable by: ' . implode(', ', $ng['admin_access']);
 if (array_diff($ng['lan_ranges'] ?? [], $og['lan_ranges'] ?? [])) $opens[] = 'LAN ranges now include: ' . implode(', ', array_diff($ng['lan_ranges'], $og['lan_ranges'] ?? []));
 

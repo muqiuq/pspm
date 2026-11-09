@@ -173,11 +173,15 @@ final class Renderer
     /** @return array{0: string, 1: array} */
     private function system(array $g): array
     {
-        $admin = ['host' => $g['admin_host'], 'in_effect' => false, 'pending' => false];
+        $admin = ['host' => $g['admin_host'], 'in_effect' => false, 'pending' => false, 'cert' => null, 'signin' => null];
+        // any valid certificate that covers the name will do (pspm-admin, a wildcard, the sign-in host's)
         $adminCert = $g['admin_host'] !== '' ? $this->certFor([$g['admin_host']], 'pspm-admin') : null;
+        $shared = $this->sharedSignin($g);
+        if ($shared) $admin['signin'] = $shared['id'];
         if ($g['admin_host'] !== '') {
-            if ($adminCert && $adminCert['covers']) $admin['in_effect'] = true;
+            if ($adminCert && $adminCert['covers']) { $admin['in_effect'] = true; $admin['cert'] = $adminCert['name']; }
             else { $admin['pending'] = true; $this->pendingCerts['pspm-admin'] = ['name' => 'pspm-admin', 'hosts' => [$g['admin_host']], 'site' => 'admin'];
+                if ($shared) $this->warnings[] = "Sign-in host {$g['admin_host']} (also the admin host name) waits for its certificate; sites that require sign-in answer 503 until then.";
             }
         }
         $ipUi = !$admin['in_effect'];
@@ -213,6 +217,8 @@ final class Renderer
                 }
                 $o .= $this->vars('admin', implode(',', $g['admin_access']), '403');
                 $o .= "    rewrite_by_lua_file lua/block.lua;\n    access_by_lua_file lua/gate.lua;\n    set \$pspm_listener admin;\n";
+                // also the sign-in host of a provider: its /oauth2/ is public, the UI keeps the admin access
+                if ($shared) $o .= $this->oauth2Location($shared);
                 if ($g['hsts']['enabled']) $o .= '    add_header Strict-Transport-Security "max-age=' . $g['hsts']['max_age'] . ($g['hsts']['include_subdomains'] ? '; includeSubDomains' : '') . "\" always;\n";
                 $o .= "    include conf/ui.conf;\n}\n\n";
             }
@@ -485,12 +491,30 @@ final class Renderer
     }
 
     /** The sign-in host of each provider: /oauth2/* to its oauth2-proxy (plan §12.3). */
+    /** The provider whose sign-in host is also the admin host name (one server serves both), or null. */
+    private function sharedSignin(array $g): ?array
+    {
+        foreach ($this->providers as $p) if ($g['admin_host'] !== '' && $p['signin_host'] === $g['admin_host']) return $p;
+        return null;
+    }
+
+    /** /oauth2/* to a provider's oauth2-proxy: public, the sign-in pages and callbacks (plan §12.3). */
+    private function oauth2Location(array $p): string
+    {
+        return "    location /oauth2/ {\n        set \$pspm_allow public;\n        limit_req zone=pspm_signin burst=120 nodelay;\n        proxy_pass http://127.0.0.1:{$p['port']};\n"
+            . "        proxy_set_header Host \$host;\n        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$remote_addr;\n"
+            . "        proxy_set_header X-Forwarded-Proto https;\n        proxy_set_header X-Forwarded-Host \$host;\n        proxy_set_header X-Scheme https;\n"
+            . self::bufferLines('        ', 128) . "        proxy_connect_timeout 5s;\n        proxy_read_timeout 30s;\n    }\n";
+    }
+
     private function signinHosts(array $g): string
     {
         $o = "# Sign-in hosts (Microsoft sign-in through oauth2-proxy)\n";
         $v6 = $this->facts['ipv6'];
+        $shared = $this->sharedSignin($g);
         foreach ($this->providers as $p) {
             $h = $p['signin_host'];
+            if ($shared && $shared['id'] === $p['id']) { $o .= "# $h is also the admin host name: served in conf/system.conf\n"; continue; }
             $name = 'pspm-signin-' . Signin::slug($p['id']);
             $cert = $this->certFor([$h], $name);
             if (!$cert || !$cert['covers']) $this->pendingCerts[$name] = ['name' => $name, 'hosts' => [$h], 'site' => "sign-in {$p['name']}"];
@@ -502,10 +526,7 @@ final class Renderer
             $o .= "    ssl_certificate {$cert['fullchain']};\n    ssl_certificate_key {$cert['key']};\n    include static/tls-{$g['tls_profile']}.conf;\n";
             $o .= $this->vars('', 'public', '404') . "    rewrite_by_lua_file lua/block.lua;\n";
             $o .= "    add_header Strict-Transport-Security \"max-age=31536000\" always;\n";
-            $o .= "    location /oauth2/ {\n        limit_req zone=pspm_signin burst=120 nodelay;\n        proxy_pass http://127.0.0.1:{$p['port']};\n"
-                . "        proxy_set_header Host \$host;\n        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$remote_addr;\n"
-                . "        proxy_set_header X-Forwarded-Proto https;\n        proxy_set_header X-Forwarded-Host \$host;\n        proxy_set_header X-Scheme https;\n"
-                . self::bufferLines('        ', 128) . "        proxy_connect_timeout 5s;\n        proxy_read_timeout 30s;\n    }\n";
+            $o .= $this->oauth2Location($p);
             $o .= "    location = / {\n        " . ($p['start_url'] !== '' ? "return 302 \"{$p['start_url']}\";" : 'return 404;') . "\n    }\n";
             $o .= "    location / {\n        return 404;\n    }\n}\n";
         }

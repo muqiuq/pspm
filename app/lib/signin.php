@@ -88,8 +88,10 @@ final class Signin
         if (DB::val('SELECT 1 FROM oauth_providers WHERE name = ?' . ($id ? ' AND id <> ?' : ''), $id ? [$p['name'], $id] : [$p['name']])) {
             return [null, 'A provider with this name exists.'];
         }
-        if (Model::hostConflicts([$p['signin_host']], null) || $p['signin_host'] === Settings::global()['admin_host']) {
-            return [null, 'The sign-in host name is used by a site or the admin UI.'];
+        // the admin host name may also be the sign-in host (one server serves both); a site's may not
+        if (Model::hostConflicts([$p['signin_host']], null)) return [null, 'The sign-in host name is used by a site.'];
+        foreach (self::providers() as $o) {
+            if ($o['id'] !== $id && $o['signin_host'] === $p['signin_host']) return [null, "Provider {$o['name']} already uses this sign-in host."];
         }
         return DB::tx(function () use ($id, $p, $clientSecret) {
             if ($id) {

@@ -1,11 +1,13 @@
 <?php
-// Render tests/fixtures into a release directory: php tests/render-fixture.php <out dir>
+// Render tests/fixtures into a release directory: php tests/render-fixture.php <out dir> [shared]
+// "shared": the admin host name is the provider's sign-in host (one server for both).
 declare(strict_types=1);
 putenv('PSPM_ETC=/nonexistent');
 require __DIR__ . '/../app/lib/bootstrap.php';
 $out = rtrim($argv[1] ?? '', '/');
 $doc = json_dec((string)file_get_contents(__DIR__ . '/fixtures/document.json'));
 $facts = json_dec((string)file_get_contents(__DIR__ . '/fixtures/facts.json'));
+if (($argv[2] ?? '') === 'shared') $doc['global']['admin_host'] = $doc['providers'][0]['signin_host'];
 $r = (new Renderer(['id' => 1, 'document' => $doc], $facts))->render();
 if ($r['errors']) { fwrite(STDERR, implode("\n", $r['errors']) . "\n"); exit(2); }
 foreach ($r['files'] as $p => $c) { @mkdir(dirname("$out/$p"), 0755, true); file_put_contents("$out/$p", $c); }

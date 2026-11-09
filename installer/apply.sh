@@ -139,6 +139,13 @@ apply_configuration() {
         mv "$rel_dir" "$rel_dir.failed"
         APPLY_RESULT="nginx -t rejected the new configuration; nothing was switched (kept as $rel.failed)"; error "$APPLY_RESULT"; return 1
     fi
+    local dup
+    dup=$(nginx_duplicate_names "$rel_dir")
+    if [[ -n $dup ]]; then
+        record_apply "$rev_id" "$rel" "$manifest_sha" failed "duplicate host names" "$started"
+        mv "$rel_dir" "$rel_dir.failed"
+        APPLY_RESULT="two servers answer the same host name ($dup), nginx would ignore one; nothing was switched (kept as $rel.failed)"; error "$APPLY_RESULT"; return 1
+    fi
     local lf
     for lf in "$rel_dir"/lua/*.lua; do
         if ! run_quiet "lua syntax $(basename "$lf")" luajit -b "$lf" /dev/null; then
@@ -366,7 +373,7 @@ verify_release() {
         want=$(openssl x509 -in "/etc/letsencrypt/live/$cert/cert.pem" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
         have=$(openssl s_client -connect 127.0.0.1:443 -servername "$host" </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
         if [[ -z $have || $have != "$want" ]]; then VERIFY_ERROR="TLS for $host does not present certificate $cert"; error "$VERIFY_ERROR"; return 1; fi
-    done < <(jq -r '(.sites[] | [.host, (.cert // "")] | @tsv), (if .admin.in_effect then [.admin.host, "pspm-admin"] | @tsv else empty end)' "$sum" 2>/dev/null)
+    done < <(jq -r '(.sites[] | [.host, (.cert // "")] | @tsv), (if .admin.in_effect then [.admin.host, (.admin.cert // "pspm-admin")] | @tsv else empty end)' "$sum" 2>/dev/null)
     local code
     code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 https://127.0.0.1:9443/login || true)
     if [[ $code != 200 && $code != 503 ]]; then VERIFY_ERROR="the UI on 127.0.0.1:9443 answers HTTP $code"; error "$VERIFY_ERROR"; return 1; fi

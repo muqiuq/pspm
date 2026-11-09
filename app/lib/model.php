@@ -166,6 +166,8 @@ final class Model
             foreach ($pe as $k => $v) $errors[] = 'Sign-in provider ' . ($p['name'] ?? '?') . " → $k: $v";
             if (!Validate::uuid($p['id'] ?? null) || empty($p['port'])) $errors[] = 'A sign-in provider has no valid id or port.';
             else $providers[$p['id']] = $p;
+            // the admin host name may equal one sign-in host (rendered as one server); two providers may not share one
+            if (isset($hostSeen[$p['signin_host'] ?? ''])) $errors[] = "Sign-in host {$p['signin_host']} is used by two providers.";
             $hostSeen[$p['signin_host'] ?? ''] = true;
         }
         $hostSeen = array_filter($hostSeen, fn($k) => $k !== '', ARRAY_FILTER_USE_KEY);

@@ -55,6 +55,14 @@ if ($step === 'setup') {
     [$rid, $errs] = Revisions::commit("big headers: {$kb}k");
     if ($errs) throw new RuntimeException(implode('; ', $errs));
     echo "revision $rid committed\n";
+} elseif ($step === 'adminhost') {
+    // the admin host name, e.g. the sign-in host (one server for both); '' = none
+    $g = Settings::global();
+    $g['admin_host'] = (string)($argv[2] ?? '');
+    Settings::saveGlobal($g);
+    [$rid, $errs] = Revisions::commit('admin host name: ' . ($g['admin_host'] ?: 'none'));
+    if ($errs) throw new RuntimeException(implode('; ', $errs));
+    echo "revision $rid committed\n";
 } elseif ($step === 'longterm') {
     // 30 days is longer than the kernel's ipset limit (24.8 days): an authorised address
     // (allow-web set) and an escalated firewall block (block set)

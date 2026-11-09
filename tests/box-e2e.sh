@@ -65,4 +65,22 @@ st=$(runuser -u pspm -- php -r 'require "/srv/pspm/app/current/lib/bootstrap.php
 [[ $st == *'"lines"'* ]] && ok "the scan read the real nginx security log: $st" || bad "scan: $st"
 systemctl is-active -q pspm-secscan.timer pspm-notify.timer pspm-blocklists.timer pspm-backup.timer && ok "timers active" || bad "timers"
 systemctl start pspm-backup.service && ls /var/lib/pspm/backups/nightly-*/db.dump >/dev/null && ok "nightly backup writes a dump" || bad "backup"
+# the admin host name shared with the sign-in host: one server; the UI keeps the admin access, /oauth2/ is public
+lanip=$(ip -o -4 addr show scope global | awk '$2 !~ /^(docker|br-|veth)/ {sub(/\/.*/, "", $4); print $4; exit}')
+pp adminhost auth.pspm.test >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-admin.out 2>&1; rc=$?
+grep -q "Rolling back" /var/log/pspm/install-latest.log && bad "admin host = sign-in host: rolled back ($(grep -m1 'Rolling back' /var/log/pspm/install-latest.log))" \
+    || { [[ $rc == 0 || $rc == 2 ]] && ok "admin host = sign-in host applies (exit $rc), TLS check uses the certificate in use" || bad "admin host apply exit $rc"; }
+c=$(curl -sk -o /dev/null -w '%{http_code}' --resolve "auth.pspm.test:443:$lanip" https://auth.pspm.test/login)
+[[ $c == 200 ]] && ok "shared host: the UI answers from the LAN ($lanip): $c" || bad "shared host UI from LAN: $c"
+c=$(curl -sk -o /dev/null -w '%{http_code}' --resolve auth.pspm.test:443:127.0.0.1 https://auth.pspm.test/login)
+[[ $c == 403 ]] && ok "shared host: the UI refuses a non-LAN address: $c" || bad "shared host UI from 127.0.0.1: $c"
+loc=$(curl -sk -o /dev/null -w '%{http_code} %{redirect_url}' --resolve auth.pspm.test:443:127.0.0.1 'https://auth.pspm.test/oauth2/start?rd=https%3A%2F%2Fsso.pspm.test%2F')
+[[ $loc == "302 https://login.microsoftonline.com/"* ]] && ok "shared host: /oauth2/ is public and hands over to Microsoft" || bad "shared host /oauth2/: $loc"
+# a release in which two servers answer one name is refused (nginx -t only warns)
+dupdir=/tmp/dup-release; rm -rf "$dupdir"; cp -a "$(readlink -f /etc/pspm/nginx/current)" "$dupdir"
+printf 'server {\n    listen 80;\n    server_name cert.pspm.test;\n    return 404;\n}\n' >> "$dupdir/conf/signin.conf"
+d=$(bash -c '. /opt/pspm/installer/common.sh; nginx_duplicate_names "$1"' _ "$dupdir")
+[[ $d == '"cert.pspm.test" on 0.0.0.0:80'* ]] && ok "duplicate host names are detected: $d" || bad "duplicate host names: '$d'"
+rm -rf "$dupdir"
+pp adminhost '' >/dev/null && /opt/pspm/install.sh apply --yes >/dev/null 2>&1
 echo "${FAILS:-0} failures"

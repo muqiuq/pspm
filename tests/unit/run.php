@@ -151,6 +151,24 @@ ok(substr_count($f['sites/app.example.ch.conf'], 'proxy_buffer_size 128k;') === 
 ok((bool)preg_match('#location = /\.pspm/signin/auth \{[^}]*proxy_buffer_size 32k;#s', $f['sites/app.example.ch.conf']), 'sign-in check: 32k for long group lists');
 ok(str_contains($f['conf/signin.conf'], "proxy_buffer_size 128k;\n") && str_contains($f['conf/signin.conf'], "proxy_busy_buffers_size 128k;\n"), 'sign-in host: 128k with a matching busy size');
 
+// The admin host name may be a sign-in host: one server serves the UI and /oauth2/
+eq($r['summary']['admin']['cert'], 'pspm-admin', 'summary names the admin host certificate in use');
+$sh = $doc; $sh['global']['admin_host'] = $doc['providers'][0]['signin_host'];
+eq(Model::checkDocument($sh), [], 'admin host name = sign-in host is allowed');
+$rs = (new Renderer(['id' => 3, 'document' => $sh], $facts))->render();
+eq($rs['errors'], [], 'shared admin/sign-in host renders');
+$hn = $sh['global']['admin_host'];
+ok(!str_contains($rs['files']['conf/signin.conf'], "server_name $hn;"), 'shared host: no separate sign-in server');
+$allNames = implode("\n", $rs['files']);
+$tlsServers = array_filter(explode("\nserver {\n", $allNames), fn($b) => str_contains($b, 'listen 443 ssl') && str_contains($b, "server_name $hn;"));
+eq(count($tlsServers), 1, 'shared host: exactly one 443 server for the name');
+ok((bool)preg_match('#server_name ' . preg_quote($hn, '#') . ';.*?set \$pspm_allow lan,cert;.*?location /oauth2/ \{\n        set \$pspm_allow public;.*?include conf/ui\.conf;#s', $rs['files']['conf/system.conf']),
+    'shared host: the UI keeps the admin access, /oauth2/ is public');
+eq($rs['summary']['admin']['cert'], 'pspm-signin-peeeeeeee', 'shared host: the sign-in host certificate is used and recorded');
+eq($rs['summary']['admin']['signin'], $doc['providers'][0]['id'], 'shared host: summary names the provider');
+$two = $doc; $p2 = $doc['providers'][0]; $p2['id'] = 'ffffffff-ffff-4fff-8fff-ffffffffffff'; $p2['name'] = 'Second'; $p2['port'] = 4182; $two['providers'][] = $p2;
+ok((bool)array_filter(Model::checkDocument($two), fn($e) => str_contains($e, 'used by two providers')), 'two providers with one sign-in host are refused');
+
 // Review (install.sh): sign-in is part of what a site is reachable by
 $review = function (?array $old, array $new): string {
     $dir = sys_get_temp_dir();
@@ -172,6 +190,7 @@ $req = $doc; $req['sites'][0]['access']['signin']['mode'] = 'required';
 ok(str_contains($review($req, $doc), 'sign-in is now an alternative instead of required'), 'required → alternative opens');
 ok(!str_contains($review($doc, $req), 'OPENS'), 'alternative → required opens nothing');
 ok(str_contains($review($req, $req), 'No configuration changes'), 'no change, no lines');
+ok(str_contains($review($doc, $sh), "OPENS: admin host name: $hn (also the sign-in host of Example staff: /oauth2/ there stays public"), 'review: admin host shared with a sign-in host');
 $any = $doc; $any['sites'][0]['access']['signin']['groups'] = [];
 ok(str_contains($review($doc, $any), 'more users may sign in (groups: no limit)'), 'dropping the group limit opens');
 ok(str_contains($review(null, $any), 'or Microsoft sign-in (Example staff: any account from example.ch)'), 'without limits: every account the provider accepts');

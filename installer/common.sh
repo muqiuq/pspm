@@ -81,6 +81,12 @@ nginx_master_cmdline() {
 nginx_runs_pspm() { nginx_master_cmdline | grep -q -- "-p $NGX/current/"; }
 
 nginx_test() { nginx -t -q -p "$1/" -c nginx.conf; }
+# Host names that two servers of a release answer ("name" on addr:port …); nginx -t only
+# warns about them and ignores one of the servers, so apply refuses such a release.
+nginx_duplicate_names() {
+    nginx -t -p "$1/" -c nginx.conf 2>&1 | { grep -o 'conflicting server name "[^"]*" on [^ ,]*' || true; } \
+        | sed 's/conflicting server name //' | sort -u | paste -sd ' ' -
+}
 
 ip_cert_fingerprint() {
     openssl x509 -in "$ETC/tls/ip.crt" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2

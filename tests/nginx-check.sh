@@ -14,5 +14,13 @@ mkcert /etc/letsencrypt/live/pspm-signin-peeeeeeee/fullchain.pem /etc/letsencryp
 mkdir -p /var/lib/pspm/state /var/www/acme /run/php
 echo "10.0.0.5 app.internal" >> /etc/hosts
 printf '# pspm snapshot blocked\n# serial 1\n# lens4 32\n# lens6 \n203.0.113.7/32\t0\tfw\n' > /var/lib/pspm/state/blocked.tsv
-nginx -t -p "$rel/" -c nginx.conf
+# nginx -t only warns about two servers with one name (and ignores one): fail on it here
+ngt() { local out; out=$(nginx -t -p "$1/" -c nginx.conf 2>&1); local rc=$?; echo "$out"; [[ $rc == 0 ]] || return "$rc"; ! grep -q 'conflicting server name' <<<"$out"; }
+ngt "$rel"
+# the admin host name shared with the sign-in host: one server for both
+shared=/tmp/release-shared
+rm -rf "$shared"; mkdir -p "$shared"
+php /src/tests/render-fixture.php "$shared" shared >/dev/null
+cp -r /src/nginx/static "$shared/static"; cp -r /src/lua "$shared/lua"
+ngt "$shared"
 echo "--- files"; (cd "$rel" && find . -type f | sort | grep -v -e '^./static' -e '^./lua')
