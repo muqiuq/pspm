@@ -35,6 +35,26 @@ if ($step === 'setup') {
 } elseif ($step === 'revoke') {
     PKI::revoke((string)DB::val("SELECT id FROM client_certs WHERE subject_cn = 'anna@pspm.test' AND revoked_at IS NULL ORDER BY issued_at DESC LIMIT 1"), 'e2e');
     echo "revoked\n";
+} elseif ($step === 'bigheader') {
+    // backend "big" (tests/box-backend.php) with the given response header buffer, and a plain-HTTP site for it
+    $kb = (int)($argv[2] ?? 16);
+    $cur = DB::one("SELECT id, updated_at FROM backends WHERE name = 'big'");
+    [$b, $e] = Validate::backend(['name' => 'big', 'protocol' => 'http', 'header_buffer' => (string)$kb, 'servers' => [['addr' => '127.0.0.1:8099']]]);
+    if ($e) throw new RuntimeException(json_encode($e));
+    [$bid, $err] = Model::saveBackend($cur['id'] ?? null, $b, $cur['updated_at'] ?? null);
+    if ($err) throw new RuntimeException($err);
+    if (!DB::val("SELECT 1 FROM site_hosts WHERE host = 'big.pspm.test'")) {
+        $in = Validate::defaultSite();
+        $in['hosts'] = ['big.pspm.test']; $in['proxy']['backend'] = $bid; $in['access']['conditions'] = ['public'];
+        $in['tls']['mode'] = 'none';
+        [$s, $e] = Validate::site($in, [$bid]);
+        if ($e) throw new RuntimeException(json_encode($e));
+        [, $err] = Model::saveSite(null, $s, null);
+        if ($err) throw new RuntimeException($err);
+    }
+    [$rid, $errs] = Revisions::commit("big headers: {$kb}k");
+    if ($errs) throw new RuntimeException(implode('; ', $errs));
+    echo "revision $rid committed\n";
 } elseif ($step === 'longterm') {
     // 30 days is longer than the kernel's ipset limit (24.8 days): an authorised address
     // (allow-web set) and an escalated firewall block (block set)

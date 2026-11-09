@@ -29,6 +29,17 @@ code=$(curl -sk -o /dev/null -w '%{http_code}' -H 'Accept: application/json' --r
 [[ $code == 401 ]] && ok "sign-in required: an API client gets 401" || bad "API client: $code"
 loc=$(curl -sk -o /dev/null -w '%{http_code} %{redirect_url}' --resolve auth.pspm.test:443:127.0.0.1 'https://auth.pspm.test/oauth2/start?rd=https%3A%2F%2Fsso.pspm.test%2F')
 [[ $loc == "302 https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/"* ]] && ok "the sign-in host hands over to Microsoft (with PKCE)" || bad "sign-in host: $loc"
+# response header buffer of a backend (nginx's own 4k default answered 502 for the 12 KB header)
+php -S 127.0.0.1:8099 /src/tests/box-backend.php >/dev/null 2>&1 & bigpid=$!
+big() { curl -s -o /dev/null -w '%{http_code}' --resolve big.pspm.test:80:127.0.0.1 "http://big.pspm.test/?n=$1"; }
+pp bigheader 16 >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-big.out 2>&1
+c=$(big 12000); [[ $c == 200 ]] && ok "12 KB response header with the default buffer (16k): 200" || bad "12 KB header, default buffer: $c"
+c=$(big 40000); [[ $c == 502 ]] && ok "40 KB response header with the default buffer: 502" || bad "40 KB header, default buffer: $c"
+grep -q "upstream sent too big header" /var/log/nginx/error.log && ok "that 502 is logged as 'upstream sent too big header'" || bad "no 'too big header' in error.log"
+pp bigheader 64 >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-big2.out 2>&1
+grep -q "~ backend big: response header buffer 16k → 64k" /root/apply-big2.out && ok "the review names the buffer change" || bad "review: $(grep 'backend big' /root/apply-big2.out)"
+c=$(big 40000); [[ $c == 200 ]] && ok "40 KB response header with the backend set to 64k: 200" || bad "40 KB header, 64k buffer: $c"
+kill "$bigpid" 2>/dev/null
 # entries longer than the kernel's ipset limit are capped, and the set is reloaded before the cap runs out
 tmo() { ipset list "$1" | awk -v ip="$2" '$1 == ip {print $3}'; }
 pp longterm >/dev/null

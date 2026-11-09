@@ -157,6 +157,10 @@ final class Validate
     // ---------------------------------------------------------------- backends
 
     /** @return array{0: array, 1: array<string,string>} */
+    /** Response header buffer sizes a backend can choose (KB); the default is also set in http.conf. */
+    public const HEADER_BUFFERS = [16, 32, 64, 128];
+    public const HEADER_BUFFER_DEFAULT = 16;
+
     public static function backend(array $in): array
     {
         $e = [];
@@ -180,6 +184,12 @@ final class Validate
             }
         }
         $b['keepalive'] = self::int($in['keepalive'] ?? 16, 0, 1024) ?? 16;
+        // Room for the response headers of this application (proxy_buffer_size, in KB); larger
+        // headers make nginx answer 502 "upstream sent too big header". Older backends: default.
+        $hb = trim((string)($in['header_buffer'] ?? ''));
+        if ($hb === '') $hb = (string)self::HEADER_BUFFER_DEFAULT;   // not sent (older form): the default
+        $b['header_buffer'] = in_array($hb, array_map('strval', self::HEADER_BUFFERS), true) ? (int)$hb : self::HEADER_BUFFER_DEFAULT;
+        if ($b['header_buffer'] !== (int)$hb) $e['header_buffer'] = 'One of ' . implode(', ', array_map(fn($k) => "{$k}k", self::HEADER_BUFFERS)) . '.';
         $b['servers'] = [];
         foreach ((array)($in['servers'] ?? []) as $i => $s) {
             if (!is_array($s) || trim((string)($s['addr'] ?? '')) === '') continue;

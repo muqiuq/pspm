@@ -26,6 +26,24 @@ final class Renderer
     public const IDENTITY_HEADERS = ['X-Forwarded-User', 'X-Forwarded-Email', 'X-Forwarded-Groups',
         'X-Forwarded-Preferred-Username', 'X-Remote-User', 'X-Forwarded-Access-Token'];
 
+    /**
+     * proxy_buffer_size for response headers up to $kb KB, with proxy_buffers and
+     * proxy_busy_buffers_size that nginx -t accepts: busy >= max(header buffer, one buffer)
+     * and busy <= all buffers minus one. proxyBuffers(16) is the default in http.conf.
+     */
+    public static function proxyBuffers(int $kb): array
+    {
+        return ['proxy_buffer_size' => "{$kb}k", 'proxy_buffers' => max(8, intdiv(2 * $kb, 16)) . ' 16k',
+            'proxy_busy_buffers_size' => max(32, $kb) . 'k'];
+    }
+
+    private static function bufferLines(string $indent, int $kb): string
+    {
+        $o = '';
+        foreach (self::proxyBuffers($kb) as $k => $v) $o .= "$indent$k $v;\n";
+        return $o;
+    }
+
     public function __construct(array $revision, array $facts)
     {
         $this->doc = $revision['document'] ?? [];
@@ -398,6 +416,8 @@ final class Renderer
         $o .= "{$i}proxy_send_timeout {$p['send_timeout']}s;\n";
         $o .= "{$i}proxy_request_buffering " . ($p['request_buffering'] ? 'on' : 'off') . ";\n";
         $o .= "{$i}proxy_buffering " . ($p['response_buffering'] ? 'on' : 'off') . ";\n";
+        $hb = (int)($b['header_buffer'] ?? Validate::HEADER_BUFFER_DEFAULT);   // older revisions have no value
+        if ($hb !== Validate::HEADER_BUFFER_DEFAULT) $o .= self::bufferLines($i, $hb);
         if ($b['protocol'] === 'https') {
             $first = explode(':', trim(preg_replace('/\]:\d+$/', ']', $b['servers'][0]['addr']) ?? '', '[]'))[0];
             $sni = $b['tls_name'] ?: (IP::valid($first) ? '' : preg_replace('/:\d+$/', '', $b['servers'][0]['addr']));
@@ -459,7 +479,9 @@ final class Renderer
              . "        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$remote_addr;\n"
              . "        proxy_set_header X-Forwarded-Proto https;\n        proxy_set_header X-Forwarded-Host \$host;\n"
              . "        proxy_set_header X-Forwarded-Uri \$request_uri;\n        proxy_set_header X-Forwarded-Method \$request_method;\n"
-             . "        proxy_set_header X-Scheme https;\n        proxy_connect_timeout 2s;\n        proxy_read_timeout 3s;\n    }\n";
+             . "        proxy_set_header X-Scheme https;\n        proxy_connect_timeout 2s;\n        proxy_read_timeout 3s;\n"
+             . self::bufferLines('        ', 32)   // the user's groups come back in a header; Entra sends up to 200
+             . "    }\n";
     }
 
     /** The sign-in host of each provider: /oauth2/* to its oauth2-proxy (plan §12.3). */
@@ -483,7 +505,7 @@ final class Renderer
             $o .= "    location /oauth2/ {\n        limit_req zone=pspm_signin burst=120 nodelay;\n        proxy_pass http://127.0.0.1:{$p['port']};\n"
                 . "        proxy_set_header Host \$host;\n        proxy_set_header X-Real-IP \$remote_addr;\n        proxy_set_header X-Forwarded-For \$remote_addr;\n"
                 . "        proxy_set_header X-Forwarded-Proto https;\n        proxy_set_header X-Forwarded-Host \$host;\n        proxy_set_header X-Scheme https;\n"
-                . "        proxy_buffer_size 128k;\n        proxy_buffers 8 256k;\n        proxy_connect_timeout 5s;\n        proxy_read_timeout 30s;\n    }\n";
+                . self::bufferLines('        ', 128) . "        proxy_connect_timeout 5s;\n        proxy_read_timeout 30s;\n    }\n";
             $o .= "    location = / {\n        " . ($p['start_url'] !== '' ? "return 302 \"{$p['start_url']}\";" : 'return 404;') . "\n    }\n";
             $o .= "    location / {\n        return 404;\n    }\n}\n";
         }

@@ -7,6 +7,7 @@ $b = $id ? Model::backend($id) : null;
 if ($id && !$b) page_error(404, 'No such backend.');
 $errors = [];
 $form = $b ?? ['name' => '', 'protocol' => 'http', 'tls_verify' => 'off', 'tls_name' => '', 'custom_ca' => '', 'keepalive' => 16,
+    'header_buffer' => Validate::HEADER_BUFFER_DEFAULT,
     'servers' => [['addr' => '', 'weight' => 1, 'backup' => false, 'max_fails' => 1, 'fail_timeout' => 10]]];
 if (is_post()) {
     Auth::require('admin');
@@ -16,7 +17,7 @@ if (is_post()) {
             'max_fails' => $s['max_fails'] ?? 1, 'fail_timeout' => $s['fail_timeout'] ?? 10];
     }
     $in = ['name' => post('name'), 'protocol' => post('protocol'), 'tls_verify' => post('tls_verify'), 'tls_name' => post('tls_name'),
-        'custom_ca' => post('custom_ca'), 'keepalive' => post('keepalive'), 'servers' => $servers];
+        'custom_ca' => post('custom_ca'), 'keepalive' => post('keepalive'), 'header_buffer' => post('header_buffer'), 'servers' => $servers];
     [$norm, $errors] = Validate::backend($in);
     $form = $in;
     if (!$errors) {
@@ -70,6 +71,14 @@ page_start($b ? 'Backend ' . $b['name'] : 'New backend', '/backends');
     <div class="col-md-8"><?= f_text('tls_name', 'TLS name (SNI and verify name)', $form['tls_name'], $errors, 'Empty: the server\'s host name, or no SNI for an IP address') ?></div>
   </div>
   <?= f_area('custom_ca', 'Custom CA (PEM)', (string)$form['custom_ca'], $errors, 'Only with "custom CA".', 4) ?>
+
+  <h2 class="h6 mt-2">Responses</h2>
+  <div class="row">
+    <div class="col-md-4"><?= f_select('header_buffer', 'Response header buffer', (string)($form['header_buffer'] ?? Validate::HEADER_BUFFER_DEFAULT),
+        array_combine(array_map('strval', Validate::HEADER_BUFFERS), array_map(fn($k) => $k . ' KB' . ($k === Validate::HEADER_BUFFER_DEFAULT ? ' (default)' : ''), Validate::HEADER_BUFFERS)), $errors) ?></div>
+    <div class="col-md-8 small text-body-secondary pt-md-4">Raise it when nginx logs <code>upstream sent too big header</code> for this backend
+      (the visitor sees 502): large cookies, long Content-Security-Policy headers or SSO tokens. Applies to every site and route that uses this backend.</div>
+  </div>
   </fieldset>
   <?php if (!$ro): ?><button class="btn btn-primary">Save</button><?php endif; ?>
   <a class="btn btn-link" href="/backends">Back</a>

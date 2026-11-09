@@ -130,6 +130,27 @@ if (is_array($ag)) {
     eq($ag['nolines'], '', 'errors without a line name no entry');
 }
 
+// Response header buffers: every choice is a combination nginx -t accepts
+foreach (Validate::HEADER_BUFFERS as $kb) {
+    $pb = Renderer::proxyBuffers($kb);
+    $size = (int)$pb['proxy_buffer_size'];
+    [$num, $one] = array_map('intval', explode(' ', $pb['proxy_buffers']));
+    $busy = (int)$pb['proxy_busy_buffers_size'];
+    ok($size === $kb && $busy >= max($size, $one) && $busy <= ($num - 1) * $one, "header buffer {$kb}k: busy $busy within [max($size, $one), " . (($num - 1) * $one) . ']');
+}
+foreach (Renderer::proxyBuffers(Validate::HEADER_BUFFER_DEFAULT) as $k => $v) ok(str_contains($http, "\n$k $v;\n"), "http.conf default: $k $v");
+eq(Validate::backend(['name' => 'x', 'servers' => [['addr' => '10.0.0.5:80']]])[0]['header_buffer'], 16, 'header buffer defaults to 16k');
+eq(Validate::backend(['name' => 'x', 'header_buffer' => '', 'servers' => [['addr' => '10.0.0.5:80']]]), [Validate::backend(['name' => 'x', 'servers' => [['addr' => '10.0.0.5:80']]])[0], []], 'header buffer not sent by a form: default, no error');
+eq(Validate::backend(['name' => 'x', 'header_buffer' => '64', 'servers' => [['addr' => '10.0.0.5:80']]])[0]['header_buffer'], 64, 'header buffer 64k accepted');
+ok(isset(Validate::backend(['name' => 'x', 'header_buffer' => '48', 'servers' => [['addr' => '10.0.0.5:80']]])[1]['header_buffer']), 'header buffer 48k refused');
+$f = $r['files'];
+ok(str_contains($f['sites/new.example.ch.conf'], "proxy_buffer_size 128k;\n") && str_contains($f['sites/new.example.ch.conf'], "proxy_buffers 16 16k;\n"), 'backend with 128k: its locations get the buffers');
+ok(!str_contains($f['sites/printer.example.ch.conf'], 'proxy_buffer_size'), 'backend without a value (older revisions): the http.conf default');
+ok((bool)preg_match('#location \^~ /device/ \{[^}]*proxy_buffer_size 128k;#s', $f['sites/app.example.ch.conf']), 'a route with another backend gets that backend\'s buffers');
+ok(substr_count($f['sites/app.example.ch.conf'], 'proxy_buffer_size 128k;') === substr_count($f['sites/app.example.ch.conf'], 'location ^~ /device/'), 'other routes of that site keep the default');
+ok((bool)preg_match('#location = /\.pspm/signin/auth \{[^}]*proxy_buffer_size 32k;#s', $f['sites/app.example.ch.conf']), 'sign-in check: 32k for long group lists');
+ok(str_contains($f['conf/signin.conf'], "proxy_buffer_size 128k;\n") && str_contains($f['conf/signin.conf'], "proxy_busy_buffers_size 128k;\n"), 'sign-in host: 128k with a matching busy size');
+
 // Review (install.sh): sign-in is part of what a site is reachable by
 $review = function (?array $old, array $new): string {
     $dir = sys_get_temp_dir();

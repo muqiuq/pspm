@@ -63,6 +63,7 @@
    "tls_name": "secure.internal",
    "custom_ca": "",
    "keepalive": 0,
+   "header_buffer": 128,
    "servers": [
     {
      "addr": "[2001:db8::20]:443",

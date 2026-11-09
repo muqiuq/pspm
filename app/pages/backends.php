@@ -27,7 +27,8 @@ page_start('Backends', '/backends');
     <tr>
       <td><a href="/backends/edit?id=<?= h($id) ?>"><?= h($b['name']) ?></a></td>
       <td><?= h(implode(', ', array_column($b['servers'], 'addr'))) ?></td>
-      <td><?= h($b['protocol']) ?><?= $b['protocol'] === 'https' ? ' <span class="text-muted small">verify: ' . h($b['tls_verify']) . '</span>' : '' ?></td>
+      <td><?= h($b['protocol']) ?><?= $b['protocol'] === 'https' ? ' <span class="text-muted small">verify: ' . h($b['tls_verify']) . '</span>' : '' ?>
+        <?= ($hb = (int)($b['header_buffer'] ?? Validate::HEADER_BUFFER_DEFAULT)) !== Validate::HEADER_BUFFER_DEFAULT ? '<span class="text-muted small">headers ' . $hb . ' KB</span>' : '' ?></td>
       <td class="small"><?= h(implode(', ', Model::backendUsers($id)) ?: '—') ?></td>
       <td class="text-end"><?php if (Auth::can('admin')): ?><?= post_button('/backends', 'Delete', ['action' => 'delete', 'id' => $id], 'btn-outline-danger btn-sm', 'Delete backend ' . $b['name'] . '?') ?><?php endif; ?></td>
     </tr>

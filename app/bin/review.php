@@ -92,7 +92,13 @@ foreach ($os as $id => $s) if (!isset($ns[$id])) $lines[] = '- site ' . $s['host
 $ob = $byId($old['backends'] ?? []); $nb = $byId($new['backends'] ?? []);
 foreach ($nb as $id => $b) {
     if (!isset($ob[$id])) $lines[] = "+ backend {$b['name']} (" . implode(', ', array_column($b['servers'], 'addr')) . ')';
-    elseif ($ob[$id] !== $b) $lines[] = "~ backend {$b['name']}";
+    elseif ($ob[$id] !== $b) {
+        $hb = fn(array $x) => (int)($x['header_buffer'] ?? Validate::HEADER_BUFFER_DEFAULT);
+        $what = array_keys(array_filter(['servers' => 1, 'protocol' => 1, 'tls_verify' => 1, 'tls_name' => 1, 'custom_ca' => 1, 'keepalive' => 1, 'name' => 1],
+            fn($_, $k) => ($ob[$id][$k] ?? null) !== ($b[$k] ?? null), ARRAY_FILTER_USE_BOTH));
+        if ($hb($ob[$id]) !== $hb($b)) $what[] = 'response header buffer ' . $hb($ob[$id]) . 'k → ' . $hb($b) . 'k';
+        $lines[] = "~ backend {$b['name']}" . ($what ? ': ' . implode(', ', $what) : '');
+    }
 }
 foreach ($ob as $id => $b) if (!isset($nb[$id])) $lines[] = "- backend {$b['name']}";
 $oc = array_column($old['cas'] ?? [], null, 'id'); $nc = array_column($new['cas'] ?? [], null, 'id');
