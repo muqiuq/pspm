@@ -59,25 +59,32 @@ if ($pending) $b .= '<div>Waiting for a certificate: ' . h(implode(', ', array_c
 $tiles[] = tile('Sites', $pending ? 'amber' : (count($sites) ? 'green' : 'grey'), $b, '/sites');
 
 // Certificates
-$certs = Live::certs();
-usort($certs, fn($a, $b) => strcmp($a['not_after'], $b['not_after']));
+// server certificates (Let's Encrypt, IP certificate, trusted CAs): the worst state counts
+$server = Live::serverCertificates();
+$rank = ['grey' => 0, 'green' => 1, 'amber' => 2, 'red' => 3];
 $level = 'grey';
 $b = '';
-if ($certs) {
-    $next = $certs[0];
-    $days = (int)floor((strtotime($next['not_after']) - time()) / 86400);
-    $b .= '<div>' . count($certs) . ' Let\'s Encrypt certificates; next expiry: ' . h($next['name']) . ' in ' . $days . ' days</div>';
-    $level = $days < 7 ? 'red' : ($days < 20 ? 'amber' : 'green');
+$le = array_values(array_filter($server, fn($c) => $c['kind'] === "Let's Encrypt"));
+if ($le) {
+    $days = (int)floor((strtotime($le[0]['not_after']) - time()) / 86400);   // sorted by end date
+    $b .= '<div>' . count($le) . ' Let\'s Encrypt certificates; next expiry: ' . h($le[0]['name']) . ' in ' . $days . ' days</div>';
 } else {
     $b .= '<div>No Let\'s Encrypt certificate yet.</div>';
 }
+foreach ($server as $c) {
+    if (str_starts_with($c['kind'], 'Client CA')) continue;   // CAs: the check below (every CA, not only trusted ones)
+    if ($rank[$c['state'][0]] > $rank[$level]) $level = $c['state'][0];
+    if (in_array($c['state'][0], ['amber', 'red'], true)) $b .= '<div class="text-' . ($c['state'][0] === 'red' ? 'danger' : 'warning-emphasis') . '">' . h($c['name'] . ': ' . $c['state'][1]) . '</div>';
+}
+if ($level === 'grey' && $le) $level = 'green';
+if ($pendingN = count(Live::pendingCertificates())) { $b .= "<div>$pendingN waiting for a certificate</div>"; if ($rank[$level] < 2) $level = 'amber'; }
 $soon = (int)DB::val("SELECT count(*) FROM client_certs WHERE revoked_at IS NULL AND not_after BETWEEN now() AND now() + interval '30 days'");
 $new7 = DB::all("SELECT subject_cn FROM client_certs WHERE issued_at > now() - interval '7 days' ORDER BY issued_at DESC");
 $caSoon = DB::all("SELECT name FROM cas WHERE not_after < now() + interval '1 year'");
 if ($soon) { $b .= "<div>$soon client certificates expire within 30 days</div>"; if ($level !== 'red') $level = 'amber'; }
 if ($new7) $b .= '<div>Issued in 7 days: ' . h(implode(', ', array_slice(array_column($new7, 'subject_cn'), 0, 5))) . (count($new7) > 5 ? ' …' : '') . '</div>';
 if ($caSoon) { $b .= '<div class="text-danger">CA expiring within a year: ' . h(implode(', ', array_column($caSoon, 'name'))) . '</div>'; $level = 'red'; }
-$tiles[] = tile('Certificates', $level, $b, '/certificates');
+$tiles[] = tile('Certificates', $level, $b, '/certificates#server');
 
 // Access
 $cleared = (int)DB::val('SELECT count(*) FROM cleared_ips WHERE expires_at IS NULL OR expires_at > now()');

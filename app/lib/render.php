@@ -21,6 +21,7 @@ final class Renderer
     private array $summary = [];
     private array $providers = [];
     private array $providerHosts = [];
+    private array $signinCerts = [];   // provider id → name of the certificate its sign-in host uses (null: pending)
     private array $providerToken = [];
 
     public const IDENTITY_HEADERS = ['X-Forwarded-User', 'X-Forwarded-Email', 'X-Forwarded-Groups',
@@ -111,6 +112,7 @@ final class Renderer
         sort($this->webports);
         $this->summary['providers'] = array_map(fn($p) => ['id' => $p['id'], 'slug' => Signin::slug($p['id']), 'name' => $p['name'],
             'port' => $p['port'], 'signin_host' => $p['signin_host'], 'tenant_id' => $p['tenant_id'],
+            'cert' => ($admin['signin'] ?? null) === $p['id'] ? $admin['cert'] : ($this->signinCerts[$p['id']] ?? null),
             'sites' => array_values(array_unique($this->providerHosts[$p['id']] ?? []))], array_values($this->providers));
         $this->summary += ['sites' => $siteSummaries, 'admin' => $admin, 'webports' => array_values(array_unique($this->webports)),
             'pending_certs' => array_values($this->pendingCerts), 'acme_email' => $g['acme_email']];
@@ -527,6 +529,7 @@ final class Renderer
             $name = 'pspm-signin-' . Signin::slug($p['id']);
             $cert = $this->certFor([$h], $name);
             if (!$cert || !$cert['covers']) $this->pendingCerts[$name] = ['name' => $name, 'hosts' => [$h], 'site' => "sign-in {$p['name']}"];
+            $this->signinCerts[$p['id']] = $cert['name'] ?? null;
             $o .= "server {\n    listen 80;\n" . ($v6 ? "    listen [::]:80;\n" : '') . "    server_name $h;\n" . $this->vars('', 'public', '404');
             $o .= "    rewrite_by_lua_file lua/block.lua;\n" . $this->acmeLocation();
             $o .= $cert ? "    location / {\n        return 301 https://\$host\$request_uri;\n    }\n}\n" : "    location / {\n        return 503;\n    }\n}\n";

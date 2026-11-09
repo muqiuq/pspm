@@ -91,6 +91,11 @@ $siteName = fn(string $id) => $sites[$id]['hosts'][0] ?? '?';
 $live = Live::revision()['document']['cas'] ?? [];
 $liveIds = array_column($live, 'id');
 $issuers = array_filter($cas, fn($c) => $c['key_wrapped'] && strtotime($c['not_after']) > time());
+$serverCerts = Live::serverCertificates();
+$pendingCerts = Live::pendingCertificates();
+$certbotActive = Status::unitActive('certbot.timer');
+$certbotNext = Status::timerNext('certbot.timer');
+$daysLeft = fn(string $t) => (int)floor((strtotime($t) - time()) / 86400);
 
 page_start('Certificates', '/certificates');
 if ($issued) {
@@ -110,8 +115,52 @@ if ($issued) {
     page_end();
 }
 ?>
-<h1 class="h4 mb-3">Certificates</h1>
+<h1 class="h4 mb-2">Certificates</h1>
+<nav class="mb-3 small"><a href="#server">Server certificates</a> · <a href="#client">Client certificates (PKI)</a></nav>
 <?= errors_box($errors) ?>
+
+<section id="server" class="mb-5">
+  <h2 class="h5">Server certificates</h2>
+  <p class="small mb-2">
+    Renewal: <?= $certbotActive === null ? 'unknown' : ($certbotActive ? badge('green', 'certbot.timer active') : badge('red', 'certbot.timer not active')) ?>
+    <?= $certbotNext ? '· next run ' . h(date('Y-m-d H:i', $certbotNext)) : '' ?>
+    · Let's Encrypt certificates are renewed 30 days before they end; nginx picks up a renewed one by itself.
+  </p>
+  <div class="table-responsive">
+  <table class="table table-sm small align-middle">
+    <thead><tr><th>Certificate</th><th>Names</th><th>Issuer</th><th>Key</th><th>Valid from</th><th>Valid until</th><th>Used by</th><th>State</th></tr></thead>
+    <tbody>
+    <?php foreach ($serverCerts as $sc): $d = $daysLeft($sc['not_after']); ?>
+      <tr>
+        <td><strong><?= h($sc['name']) ?></strong><div class="text-muted"><?= h($sc['kind']) ?></div>
+          <details><summary class="text-muted">SHA-256</summary><code class="text-break small"><?= h($sc['fingerprint']) ?></code></details></td>
+        <td class="text-break"><?= h(implode(', ', $sc['sans'] ?: [$sc['subject']])) ?></td>
+        <td><?= h($sc['self_signed'] ? 'self-signed' : $sc['issuer']) ?></td>
+        <td class="text-nowrap"><?= h($sc['key']) ?></td>
+        <td class="text-nowrap"><?= h(fmt_time($sc['not_before'], 'Y-m-d')) ?></td>
+        <td class="text-nowrap"><?= h(fmt_time($sc['not_after'], 'Y-m-d')) ?><div class="text-muted"><?= $d >= 0 ? h("$d days left") : 'ended' ?></div></td>
+        <td><?= $sc['used_by'] ? implode('<br>', array_map('h', $sc['used_by'])) : '<span class="text-muted">—</span>' ?></td>
+        <td><?= badge($sc['state'][0], $sc['state'][1]) ?></td>
+      </tr>
+    <?php endforeach; ?>
+    <?php if (!$serverCerts): ?><tr><td colspan="8" class="text-muted">No certificate found (nothing applied yet?).</td></tr><?php endif; ?>
+    </tbody>
+  </table>
+  </div>
+  <?php if ($pendingCerts): ?>
+  <h3 class="h6 mt-3">Waiting for a certificate</h3>
+  <p class="small mb-1">The next <code>install.sh</code> run requests them; until then their sites answer only the ACME check (503).</p>
+  <table class="table table-sm small"><thead><tr><th>Certificate</th><th>Names</th><th>For</th><th>State</th></tr></thead><tbody>
+  <?php foreach ($pendingCerts as $pc): ?>
+    <tr><td><?= h($pc['name']) ?></td><td><?= h(implode(', ', $pc['hosts'])) ?></td><td><?= h($pc['site']) ?></td>
+      <td><?= $pc['failed_at'] ? badge('red', 'Let\'s Encrypt refused it ' . ago($pc['failed_at'])) . ' <span class="text-muted">(retried after an hour; install.sh --retry-certs retries at once; the reason is in the install log)</span>'
+                               : badge('amber', 'requested by the next install.sh run') ?></td></tr>
+  <?php endforeach; ?></tbody></table>
+  <?php endif; ?>
+</section>
+
+<section id="client">
+<h2 class="h5">Client certificates (PKI)</h2>
 <div class="row g-4">
 <div class="col-xl-7">
   <h2 class="h6">Issued client certificates</h2>
@@ -212,4 +261,5 @@ if ($issued) {
   <?php endif; ?>
 </div>
 </div>
+</section>
 <?php page_end();

@@ -6,7 +6,8 @@ pp() { runuser -u pspm -- php /src/tests/box-e2e.php "$@"; }
 # fake Let's Encrypt certificates for the test names (the box cannot get real ones)
 for h in cert.pspm.test sso.pspm.test auth.pspm.test; do
     n=pspm-$(echo "$h" | tr . -); [[ $h == auth.pspm.test ]] && n=pspm-signin-x
-    d=/etc/letsencrypt/live/$n; mkdir -p "$d"
+    d=/etc/letsencrypt/live/$n; [[ -f $d/cert.pem ]] && continue   # once: nginx keeps the loaded ones until a reload
+    mkdir -p "$d"
     openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=$h" -addext "subjectAltName=DNS:$h" -days 30 -keyout "$d/privkey.pem" -out "$d/cert.pem" 2>/dev/null
     cp "$d/cert.pem" "$d/fullchain.pem"
 done
@@ -16,6 +17,12 @@ grep -E "OPENS|✓|!|✗|Result" /root/apply-e2e.out | grep -v "^    [+@ -]"
 docker ps --format '{{.Names}} {{.Status}}' | grep -E "oauth|redis" && ok "sign-in containers run" || bad "sign-in containers"
 code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve cert.pspm.test:443:127.0.0.1 https://cert.pspm.test/)
 [[ $code == 403 ]] && ok "cert-only site without a certificate: 403" || bad "cert-only site without a certificate: $code"
+# the certificate overview knows what uses each certificate (from the live release)
+sc=$(pp servercerts)
+grep -qP '^pspm-cert-pspm-test\tLet.s Encrypt\tsite cert\.pspm\.test\tgreen$' <<<"$sc" && ok "overview: pspm-cert-pspm-test is used by site cert.pspm.test" || bad "overview cert row: $(grep pspm-cert <<<"$sc")"
+grep -qP '^pspm-signin-x\t.*\tsign-in host auth\.pspm\.test\t' <<<"$sc" && ok "overview: the sign-in host's certificate" || bad "overview sign-in row: $(grep signin <<<"$sc")"
+grep -qP '^ip\.crt\tIP certificate \(self-signed\)\tadmin UI by IP address; SSH tunnel' <<<"$sc" && ok "overview: the IP certificate" || bad "overview IP row: $(grep ip.crt <<<"$sc")"
+grep -qP '^E2E Clients\tClient CA \(trusted by nginx\)\t' <<<"$sc" && ok "overview: the client CA nginx trusts" || bad "overview CA row: $sc"
 pp issue
 openssl pkcs12 -in /var/lib/pspm/tmp/e2e.p12 -passin "pass:$(cat /var/lib/pspm/tmp/e2e.pass)" -nodes -out /tmp/e2e.pem 2>/dev/null
 code=$(curl -sk -o /dev/null -w '%{http_code}' --cert /tmp/e2e.pem --resolve cert.pspm.test:443:127.0.0.1 https://cert.pspm.test/)

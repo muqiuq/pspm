@@ -13,6 +13,10 @@ php /src/app/bin/migrate.php /src/db/migrations
 php /src/app/bin/selftest.php
 pw=$(php /src/app/bin/user.php bootstrap | sed -n 's/^PASSWORD=//p')
 [[ -n $pw ]] || { echo "no bootstrap password"; exit 1; }
+# certificates for the overview on the Certificates page: a Let's Encrypt one that should have been renewed, the IP one
+d=/etc/letsencrypt/live/pspm-smoke-pspm-test; mkdir -p "$d" "$PSPM_ETC/tls"
+openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=smoke.pspm.test" -addext "subjectAltName=DNS:smoke.pspm.test" -days 20 -keyout "$d/privkey.pem" -out "$d/cert.pem" 2>/dev/null
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=PSPM smoke" -addext "subjectAltName=IP:127.0.0.1" -days 3650 -keyout /dev/null -out "$PSPM_ETC/tls/ip.crt" 2>/dev/null
 php -S 127.0.0.1:8080 /src/app/public/index.php >/tmp/server.log 2>&1 &
 sleep 1
 ADMIN_PW=$pw php /src/tests/smoke-client.php

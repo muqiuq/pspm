@@ -44,6 +44,15 @@ final class Status
         return trim($out) === 'active';
     }
 
+    /** When a systemd timer fires next (Unix time), or null. */
+    public static function timerNext(string $unit): ?int
+    {
+        if (!is_executable('/usr/bin/systemctl')) return null;
+        [$code, $out] = run_cmd(['/usr/bin/systemctl', 'show', $unit, '-p', 'NextElapseUSecRealtime', '--value'], null, 3);
+        $t = trim($out);
+        return $code === 0 && $t !== '' && $t !== 'n/a' ? (strtotime(preg_replace('/^\w{3} /', '', $t) ?? $t) ?: null) : null;
+    }
+
     public static function diskFree(string $path = '/'): ?array
     {
         $free = @disk_free_space($path); $total = @disk_total_space($path);

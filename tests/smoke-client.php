@@ -90,6 +90,10 @@ check(str_contains($b, 'sites/app.example.ch.conf'), 'the preview diff lists the
 check($c === 303, 'revision committed');
 [$c, $b] = req('GET', '/');
 check(str_contains($b, 'is ready'), 'the dashboard says the revision is ready');
+[$c, $b] = req('GET', '/certificates');
+check($c === 200 && str_contains($b, 'Server certificates') && str_contains($b, 'pspm-smoke-pspm-test') && str_contains($b, 'renewal is overdue'),
+    'certificates: overview with a Let\'s Encrypt certificate whose renewal is overdue');
+check(str_contains($b, 'IP certificate (self-signed)') && str_contains($b, 'SSH tunnel (127.0.0.1:9443)'), 'certificates: the IP certificate and what uses it');
 [$c, $b] = req('GET', '/access');
 check($c === 200 && str_contains($b, 'Create link'), 'access offers links for the site');
 [$c, $b] = req('POST', '/access', ['_csrf' => csrf($b), 'action' => 'block', 'ip' => '10.0.0.0/8', 'days' => '1', 'reason' => 'x']);

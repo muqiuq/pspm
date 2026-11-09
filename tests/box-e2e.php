@@ -64,6 +64,9 @@ if ($step === 'setup') {
     [$rid, $errs] = Revisions::commit('admin host name: ' . ($g['admin_host'] ?: 'none'));
     if ($errs) throw new RuntimeException(implode('; ', $errs));
     echo "revision $rid committed\n";
+} elseif ($step === 'servercerts') {
+    // the overview of the Certificates page: name, kind, what uses it, state
+    foreach (Live::serverCertificates() as $c) echo $c['name'], "\t", $c['kind'], "\t", implode('; ', $c['used_by']), "\t", $c['state'][0], "\n";
 } elseif ($step === 'adminlink') {
     // an access link to the admin UI; prints the token
     [, $token] = Access::createLink(null, 'box-e2e admin', 3600, null, null, '/');

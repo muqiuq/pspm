@@ -177,6 +177,8 @@ REPO=$PSPM_REPO" || true
         info "IP certificate for: $addrs"
         IP_CERT_CHANGED=1
     fi
+    # the public certificate for the overview on the Certificates page ($ETC/tls is root-only: the key is there)
+    install -m 0644 "$ETC/tls/ip.crt" "$STATUS/ip.crt"
 
     # Read access for the UI (plan §5.3): nginx logs, public certificate files.
     install -d -m 0755 /var/log/nginx

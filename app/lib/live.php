@@ -181,6 +181,104 @@ final class Live
         return $out;
     }
 
+    /** Subject, names, issuer, validity, key and SHA-256 fingerprint of one PEM certificate; null if it does not parse. */
+    public static function x509Info(string $pem): ?array
+    {
+        $x = @openssl_x509_parse($pem);
+        if (!$x) return null;
+        $sans = [];
+        foreach (explode(',', $x['extensions']['subjectAltName'] ?? '') as $san) {
+            $san = trim($san);
+            if (str_starts_with($san, 'DNS:')) $sans[] = strtolower(substr($san, 4));
+            elseif (str_starts_with($san, 'IP Address:')) $sans[] = substr($san, 11);
+        }
+        $key = '';
+        if (($pub = @openssl_pkey_get_public($pem)) && ($d = openssl_pkey_get_details($pub))) {
+            $key = match ($d['type']) { OPENSSL_KEYTYPE_RSA => 'RSA', OPENSSL_KEYTYPE_EC => 'EC', default => 'other' } . ' ' . $d['bits'];
+        }
+        $fp = (string)@openssl_x509_fingerprint($pem, 'sha256');
+        return ['subject' => (string)($x['subject']['CN'] ?? ''), 'sans' => $sans,
+            'issuer' => (string)($x['issuer']['CN'] ?? ($x['issuer']['O'] ?? '')), 'self_signed' => $x['subject'] == $x['issuer'],
+            'not_before' => gmdate('Y-m-d\TH:i:s\Z', (int)$x['validFrom_time_t']), 'not_after' => gmdate('Y-m-d\TH:i:s\Z', (int)$x['validTo_time_t']),
+            'key' => $key, 'fingerprint' => implode(':', str_split(strtoupper($fp), 2))];
+    }
+
+    /**
+     * Every certificate the box presents or trusts, for the overview on the Certificates page:
+     * Let's Encrypt certificates (with what uses them), the IP certificate, the client CAs
+     * nginx trusts and the custom CAs of backends. Each row has a state [level, text].
+     */
+    public static function serverCertificates(): array
+    {
+        $now = time();
+        $state = function (string $notAfter, int $amberDays, int $redDays = 0) use ($now): array {
+            $days = (int)floor((strtotime($notAfter) - $now) / 86400);
+            if ($days < 0) return ['red', 'expired'];
+            if ($days < $redDays) return ['red', "expires in $days days"];
+            if ($days < $amberDays) return ['amber', "expires in $days days"];
+            return ['green', 'valid'];
+        };
+        $sum = self::summary() ?? [];
+        $doc = self::revision()['document'] ?? [];
+        $rows = [];
+
+        // Let's Encrypt: what nginx uses each one for (the live release's summary)
+        foreach (glob('/etc/letsencrypt/live/*/cert.pem') ?: [] as $f) {
+            $name = basename(dirname($f));
+            $i = self::x509Info((string)@file_get_contents($f));
+            if (!$i) continue;
+            $used = [];
+            foreach ($sum['sites'] ?? [] as $s) if (($s['cert'] ?? null) === $name) $used[] = 'site ' . $s['host'];
+            if (($sum['admin']['cert'] ?? null) === $name) $used[] = 'admin UI ' . $sum['admin']['host'];
+            foreach ($sum['providers'] ?? [] as $p) {
+                $c = $p['cert'] ?? null;   // releases before this field: by the names the certificate covers
+                if ($c === $name || ($c === null && Renderer::sanCovers($i['sans'], $p['signin_host']))) $used[] = 'sign-in host ' . $p['signin_host'];
+            }
+            [$lvl, $txt] = $state($i['not_after'], 25, 7);   // certbot renews 30 days before the end
+            if ($lvl === 'amber') $txt .= ' (renewal is overdue)';
+            if (!$used && $lvl === 'green') { $lvl = 'grey'; $txt = 'valid, not used'; }
+            $rows[] = ['kind' => "Let's Encrypt", 'name' => $name, 'used_by' => array_values(array_unique($used)), 'state' => [$lvl, $txt]] + $i;
+        }
+        usort($rows, fn($a, $b) => strcmp($a['not_after'], $b['not_after']));
+
+        // the self-signed certificate for the UI by IP address and through the SSH tunnel
+        // install.sh copies the public certificate into the status directory ($ETC/tls holds the key and is root-only)
+        $ip = is_readable(PSPM_STATUS . '/ip.crt') ? PSPM_STATUS . '/ip.crt' : PSPM_ETC . '/tls/ip.crt';
+        if (is_readable($ip) && ($i = self::x509Info((string)file_get_contents($ip)))) {
+            $rows[] = ['kind' => 'IP certificate (self-signed)', 'name' => 'ip.crt', 'used_by' => ['admin UI by IP address', 'SSH tunnel (127.0.0.1:9443)'],
+                'state' => $state($i['not_after'], 60, 7)] + $i;
+        }
+
+        // client CAs nginx trusts, and the custom CAs backends are checked against
+        foreach ($doc['cas'] ?? [] as $ca) {
+            if (!($i = self::x509Info((string)($ca['cert_pem'] ?? '')))) continue;
+            $rows[] = ['kind' => 'Client CA (trusted by nginx)', 'name' => (string)$ca['name'], 'used_by' => ['client certificates of every site'],
+                'state' => $state($i['not_after'], 365, 30)] + $i;
+        }
+        foreach ($doc['backends'] ?? [] as $b) {
+            if (($b['tls_verify'] ?? '') !== 'custom') continue;
+            preg_match_all('/-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----/s', (string)($b['custom_ca'] ?? ''), $m);
+            foreach ($m[0] as $pem) {
+                if (!($i = self::x509Info($pem))) continue;
+                $rows[] = ['kind' => 'Backend CA (custom)', 'name' => (string)$b['name'], 'used_by' => ['TLS check of backend ' . $b['name']],
+                    'state' => $state($i['not_after'], 30, 7)] + $i;
+            }
+        }
+        return $rows;
+    }
+
+    /** Certificates the live release waits for (requested by the next install.sh run), with Let's Encrypt refusals. */
+    public static function pendingCertificates(): array
+    {
+        $fails = Status::read('cert-failures') ?? [];
+        $out = [];
+        foreach ((self::summary() ?? [])['pending_certs'] ?? [] as $p) {
+            $at = isset($fails[$p['name']]) && is_int($fails[$p['name']]) ? $fails[$p['name']] : null;
+            $out[] = $p + ['failed_at' => $at ? gmdate('Y-m-d\TH:i:s\Z', $at) : null];
+        }
+        return $out;
+    }
+
     /**
      * Facts for a preview render: those the live release was rendered with (IPv6, resolved
      * backends, modules …), with fresh certificates. Without them the renderer's defaults

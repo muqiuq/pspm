@@ -183,6 +183,22 @@ ok((bool)preg_match('#location \^~ /\.pspm/access/ \{\n        set \$pspm_allow 
     'admin access with links: the admin server serves /.pspm/access/ (public, rate-limited, link handler only)');
 ok(str_contains($adminSrv($ra['files']), 'set $pspm_allow lan,cleared,cert;'), 'the admin server accepts cleared addresses');
 
+// Server certificate overview: what a certificate is, and which certificate each sign-in host uses
+$pem = shell_exec('openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj /CN=x.pspm.test '
+    . '-addext subjectAltName=DNS:x.pspm.test,DNS:y.pspm.test,IP:10.0.0.1 -days 30 -keyout /dev/null 2>/dev/null');
+$xi = Live::x509Info((string)$pem);
+ok(is_array($xi), 'x509Info parses a certificate');
+if ($xi) {
+    eq($xi['sans'], ['x.pspm.test', 'y.pspm.test', '10.0.0.1'], 'x509Info: DNS names and IP addresses');
+    eq($xi['key'], 'EC 256', 'x509Info: key type and size');
+    ok($xi['self_signed'] && $xi['subject'] === 'x.pspm.test', 'x509Info: subject, self-signed');
+    ok(abs(strtotime($xi['not_after']) - (time() + 30 * 86400)) < 120, 'x509Info: end of validity');
+    ok((bool)preg_match('/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/', $xi['fingerprint']), 'x509Info: SHA-256 fingerprint');
+}
+eq(Live::x509Info('not a certificate'), null, 'x509Info: garbage gives null');
+eq($r['summary']['providers'][0]['cert'], 'pspm-signin-peeeeeeee', 'summary: the certificate of the sign-in host');
+eq($rs['summary']['providers'][0]['cert'], $rs['summary']['admin']['cert'], 'summary: a shared sign-in host uses the admin host\'s certificate');
+
 // Changes page: an unchanged working copy previews without differences, also on a box
 // without IPv6 (the preview uses the facts the live release was rendered with)
 $etc = sys_get_temp_dir() . '/pspm-preview-' . getmypid();
