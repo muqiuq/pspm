@@ -1,0 +1,16 @@
+[Unit]
+Description=PSPM security analysis (AI verdicts, behaviour, honeypots), when due
+After=network-online.target docker.service
+ConditionPathExists=/srv/pspm/app/current/bin/secscan.php
+
+[Service]
+Type=oneshot
+User=pspm
+Group=pspm
+ExecStart=/usr/bin/php /srv/pspm/app/current/bin/secscan.php --analyse
+Nice=10
+# AI calls may take minutes each (Settings → Models → "Answer within")
+TimeoutStartSec=3600
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes

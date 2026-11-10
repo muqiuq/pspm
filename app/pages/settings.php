@@ -26,13 +26,15 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
     if (trim((string)post('ai_key')) !== '') $ai['key_enc'] = Crypto::seal(trim((string)post('ai_key')));
     if (isset($_POST['ai_key_clear'])) $ai['key_enc'] = '';
     $ai['daily_cap'] = Validate::int(post('ai_daily_cap'), 1, 10000) ?? $ai['daily_cap'];
+    $ai['timeout'] = Validate::int(post('ai_timeout'), 10, 900) ?? $ai['timeout'];
     $ai['confidence'] = max(0.5, min(0.99, (float)post('ai_confidence', $ai['confidence'])));
     $ai['analyse_authorised'] = isset($_POST['ai_authorised']);
     $ai['reaction_hours'] = Validate::int(post('reaction_hours'), 1, 720) ?? $ai['reaction_hours'];
     Settings::set('ai', $ai);
     // the injection check
     $ck = array_replace(AI::CHECK_DEFAULTS, (array)Settings::get('ai_check', []));
-    $ck['type'] = Validate::enum(post('check_type'), ['classifier', 'chat']) ?? 'classifier';
+    $ck['type'] = Validate::enum(post('check_type'), array_keys(AI::CHECK_TYPES)) ?? 'decisions';
+    $ck['timeout'] = Validate::int(post('check_timeout'), 10, 900) ?? $ck['timeout'];
     $ck['model'] = preg_match('#^[A-Za-z0-9._:/@-]{0,100}$#', trim((string)post('check_model'))) ? trim((string)post('check_model')) : $ck['model'];
     $ck['same_as_main'] = isset($_POST['check_same']);
     $u = trim((string)post('check_base_url'));
@@ -53,6 +55,7 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
     if (trim((string)post('verify_key')) !== '') $vf['key_enc'] = Crypto::seal(trim((string)post('verify_key')));
     if (isset($_POST['verify_key_clear'])) $vf['key_enc'] = '';
     $vf['daily_cap'] = Validate::int(post('verify_daily_cap'), 1, 100000) ?? $vf['daily_cap'];
+    $vf['timeout'] = Validate::int(post('verify_timeout'), 10, 900) ?? $vf['timeout'];
     Settings::set('ai_verify', $vf);
     Settings::set('unknown_hosts', ['threshold' => Validate::int(post('unknown_threshold'), 0, 1000) ?? 5, 'window' => 60 * (Validate::int(post('unknown_window'), 1, 1440) ?? 60)]);
     Settings::set('traps', ['enabled' => isset($_POST['traps_enabled'])]);
@@ -130,6 +133,7 @@ $modelGroup = function (string $role, string $p, string $what, array $m, array $
     $o .= f_text("{$p}_key", 'API key' . ($m['key_enc'] ? ' (set; empty keeps it)' : ''), '', [], 'Stored encrypted.', 'password', '', ['autocomplete' => 'new-password']);
     $o .= $m['key_enc'] ? f_check("{$p}_key_clear", 'Remove the key', false) : '';
     $o .= '</div>' . implode('', $extra['after'] ?? []);
+    $o .= '<div class="row align-items-end"><div class="col-6">' . f_text("{$p}_timeout", 'Answer within (seconds)', $m['timeout'], [], 'Longer requests are cut off and logged; 10–900.', 'number') . '</div></div>';
     $o .= '<div class="row align-items-end"><div class="col-6">' . f_text("{$p}_daily_cap", 'Calls per day at most', $m['daily_cap'], [], '', 'number') . '</div>'
         . '<div class="col-6 mb-3"><button class="btn btn-sm btn-outline-secondary" name="test_role" value="' . h($role) . '">Save and test</button>'
         . ' <span class="small text-muted">saves this page first</span></div></div>';
@@ -210,11 +214,10 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
       <?= $modelGroup('check', 'check', 'Screens every attacker-written string (paths, user agents) before a model sees it. Its answer has one fixed type, '
           . '{label: safe|injection, score}; anything else counts as injection. Flagged strings are removed and the address is tagged. Off or failing: '
           . 'user agents are left out and only path-shaped paths are sent.', $ck, [
-          'before' => [f_select('check_type', 'Type', $ck['type'], ['classifier' => 'Classifier API (e.g. Llama Prompt Guard 2 behind a Hugging Face-style endpoint)',
-              'chat' => 'Chat model (OpenAI-compatible) asked for the fixed type'])],
-          'model_help' => 'Classifier: a name for the log and the cache. Chat: the model id. Empty: off.',
-          'url_help' => 'Classifier: the full URL that takes {"inputs": [...]}. Chat: the OpenAI-compatible base URL.',
-          'same' => f_check('check_same', 'Chat: same API URL and key as the main model', $ck['same_as_main']),
+          'before' => [f_select('check_type', 'Type', $ck['type'], AI::CHECK_TYPES)],
+          'model_help' => 'Decision model: e.g. typesafe/jev-1.14. Chat: the model id. Classifier: a name for the log and the cache. Empty: off.',
+          'url_help' => 'Decision model: the decisions endpoint (empty: ' . AI::DECISIONS_URL . '). Classifier: the full URL that takes {"inputs": [...]}. Chat: the OpenAI-compatible base URL.',
+          'same' => f_check('check_same', 'Same key as the main model (a chat check also uses its URL)', $ck['same_as_main']),
           'after' => [f_text('check_threshold', 'Injection from score', $ck['threshold'], [], '0.05–0.99; the score is the probability of an injection')]]) ?>
       <?php $vf = AI::model('verify'); ?>
       <?= $modelGroup('verify', 'verify', 'An independent second opinion on every automatic block, with the same evidence but not the first verdict. Both must say block; '

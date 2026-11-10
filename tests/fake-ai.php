@@ -35,10 +35,26 @@ if (str_ends_with($path, '/classify-auth')) {
     if ($auth !== 'Bearer guard-key') out(401, ['error' => 'invalid token']);
     out(200, array_map(fn($t) => stripos((string)$t, 'ignore') !== false ? [['label' => 'INJECTION', 'score' => 0.98]] : [['label' => 'INJECTION', 'score' => 0.02]], (array)($in['inputs'] ?? [])));
 }
+// a decisions API (OpenRouter /api/alpha/decisions, e.g. typesafe/jev-1.14): typed questions about "state"
+if (str_ends_with($path, '/decisions')) {
+    if (($_SERVER['HTTP_AUTHORIZATION'] ?? '') === '') out(401, ['error' => ['message' => 'Missing Authentication header', 'code' => 401]]);
+    if (!is_string($in['model'] ?? null) || !isset($in['state']) || !is_array($in['questions'] ?? null)) {
+        out(400, ['error' => ['message' => json_encode([['expected' => 'string', 'code' => 'invalid_type', 'path' => ['model'], 'message' => 'Invalid input']]), 'code' => 400]]);
+    }
+    $answers = [];
+    foreach ($in['questions'] as $q => $def) {
+        if (($in['model'] ?? '') === 'fake-jev-refuse') { $answers[$q] = ['type' => 'refusal']; continue; }
+        $text = (string)(is_array($in['state']) ? ($in['state'][$q] ?? '') : $in['state']);
+        $answers[$q] = ['type' => 'noul', 'noul' => stripos($text, 'ignore') !== false ? 0.97 : 0.03, 'confidence' => 0.9];
+    }
+    out(200, ['id' => 'gen-dec-fake', 'model' => $in['model'] . '-20261101', 'provider' => 'TypeSafe', 'answers' => $answers,
+        'usage' => ['input_tokens' => 40 * count($answers), 'output_tokens' => count($answers), 'cost' => 0.00001]]);
+}
 if (!str_ends_with($path, '/chat/completions')) out(404, ['error' => 'unknown path']);
 $model = (string)($in['model'] ?? '');
 if ($model === 'fake-noschema' && ($in['response_format']['type'] ?? '') === 'json_schema') out(400, ['error' => ['message' => 'response_format json_schema is not supported for this model']]);
 if ($model === 'fake-500') out(500, ['error' => ['message' => 'internal error (fake)']]);
+if ($model === 'fake-slow') { http_response_code(200); echo ' '; flush(); sleep(12); }   // headers at once, then a model that takes too long
 if ($model === 'fake-429') out(429, ['error' => ['message' => 'rate limited (fake)']]);
 $system = (string)($in['messages'][0]['content'] ?? '');
 $user = json_decode((string)($in['messages'][1]['content'] ?? '{}'), true) ?: [];

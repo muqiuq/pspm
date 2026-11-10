@@ -287,6 +287,7 @@ final class Traps
         // the verifier: a proposal counts as a vote only when it agrees (docs/security-ai-improvements.md §3)
         $rejected = 0;
         $verifyCall = null;
+        $verifyFailed = false;
         if ($props && AI::configured('verify')) {
             $vsys = 'You review honeypot rules proposed for a reverse proxy: request paths that only attackers ask for. For each proposal decide "confirm" or '
                 . '"reject"; reject anything a real application, user, crawler or monitoring system might request. Answer only JSON: '
@@ -299,7 +300,7 @@ final class Traps
                     'evidence' => self::evidenceFor($props, $items)], $ps, 'decisions');
                 foreach ((array)($vans['decisions'] ?? []) as $d) if (is_array($d) && ($d['decision'] ?? '') === 'confirm' && isset($props[$d['p'] ?? ''])) $ok[$d['p']] = true;
             } catch (Throwable) {
-                // no answer from the verifier: no votes in this window (the AI log has the error)
+                $verifyFailed = true;   // no answer from the verifier: no votes in this window (the AI log has the error)
             }
             $rejected = count($props) - count($ok);
             $props = array_intersect_key($props, $ok);
@@ -313,7 +314,8 @@ final class Traps
             }
         }
         DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, answer, model, outcome, call_id, verify_model, verify_call_id) VALUES ('mining', 'traps', 'patterns', ?::jsonb, ?, ?, ?, ?, ?)",
-            [json_enc($ans), AI::settings()['model'], "$n votes" . ($rejected ? ", $rejected not confirmed by the verifier" : ''), $callId,
+            [json_enc($ans), AI::settings()['model'], "$n votes" . ($verifyFailed ? ', the verifier did not answer (' . count($ans['patterns'] ?? []) . ' proposals wait for the next mining)'
+                : ($rejected ? ", $rejected rejected by the verifier" : '')), $callId,
              $verifyCall ? AI::model('verify')['model'] : null, $verifyCall]);
         return $n;
     }

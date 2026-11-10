@@ -1,5 +1,5 @@
 [Unit]
-Description=PSPM security scan (security log, AI verdicts, behaviour, honeypots) (timer)
+Description=PSPM security scan: read the security log (timer)
 
 [Timer]
 OnBootSec=2min

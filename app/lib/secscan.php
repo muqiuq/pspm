@@ -30,26 +30,47 @@ final class SecScan
             [$key, json_enc($value)]);
     }
 
-    public static function run(bool $forceFull = false): array
+    /**
+     * One scan round, in two parts with their own locks, so a slow AI model never holds up
+     * reading the log:
+     *   "ingest"  (pspm-secscan, every minute): read the security log, fast blocks, aggregates
+     *   "analyse" (pspm-analyse, every minute, works when due: every 5 min or on "Run now"):
+     *             AI verdicts, behaviour, honeypots
+     *   "all"     (tests, --full): both; $forceFull forces the analysis
+     */
+    public static function run(bool $forceFull = false, string $part = 'all'): array
     {
-        if (!DB::val('SELECT pg_try_advisory_lock(424242)')) return ['skipped' => 'another scan is running'];
-        $run = (int)DB::val("INSERT INTO scan_runs (kind) VALUES ('scan') RETURNING id");
-        try {
-            $stats = self::ingest();
+        $out = [];
+        if ($part !== 'analyse') $out = self::locked(424242, 'ingest', fn() => self::ingest());
+        if ($part !== 'ingest') {
             $last = self::state('last_full');
             $now = self::state('run_now');
             if ($forceFull || $now || !$last || time() - strtotime($last['at']) >= 290) {
-                if ($now) DB::q("DELETE FROM scan_state WHERE key = 'run_now'");
-                $stats['full'] = self::analyse((bool)$now || $forceFull);
-                self::setState('last_full', ['at' => gmdate('c')]);
+                $out['full'] = self::locked(424243, 'analyse', function () use ($now, $forceFull) {
+                    if ($now) DB::q("DELETE FROM scan_state WHERE key = 'run_now'");
+                    $r = self::analyse((bool)$now || $forceFull);
+                    self::setState('last_full', ['at' => gmdate('c')]);
+                    return $r;
+                });
             }
+        }
+        return $out;
+    }
+
+    /** Run one part under its advisory lock, recorded in scan_runs. */
+    private static function locked(int $lock, string $kind, callable $fn): array
+    {
+        if (!DB::val('SELECT pg_try_advisory_lock(?)', [$lock])) return ['skipped' => "another $kind is running"];
+        $run = (int)DB::val('INSERT INTO scan_runs (kind) VALUES (?) RETURNING id', [$kind]);
+        try {
+            $stats = $fn();
             DB::q('UPDATE scan_runs SET finished_at = now(), stats = ?::jsonb WHERE id = ?', [json_enc($stats), $run]);
             return $stats;
         } catch (Throwable $e) {
             DB::q('UPDATE scan_runs SET finished_at = now(), stats = ?::jsonb WHERE id = ?', [json_enc(['error' => $e->getMessage()]), $run]);
             throw $e;
         } finally {
-            DB::val('SELECT pg_advisory_unlock(424242)');
+            DB::val('SELECT pg_advisory_unlock(?)', [$lock]);
         }
     }
 

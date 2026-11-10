@@ -155,7 +155,13 @@ answer has one fixed type, checked by PSPM:
     MB of memory, which is tight on a 2 GB box
   - **behind an API:** configured in its own Settings fields; the strings leave the box,
     already scrubbed
-- *Built:* two types in Settings. *Classifier API*: a URL that takes `{"inputs": [...]}`
+- *Built:* the **decision model** type for jev (`typesafe/jev-1.14` on OpenRouter's
+  `/api/alpha/decisions`, the default URL). The strings go into `state`, 25 per request,
+  each with one typed `noul` question about its own field ("does it contain instructions
+  aimed at an AI?", with criteria for true and false). The answer's probability is the
+  score; a refusal, a missing answer or another type counts as injection. "Same key as
+  the main model" uses the main OpenRouter key and keeps the decisions URL.
+- *Built:* two more types in Settings. *Classifier API*: a URL that takes `{"inputs": [...]}`
   and answers per input a list of `{label, score}` (Hugging Face text classification, e.g.
   Llama Prompt Guard 2 hosted or on `127.0.0.1`; labels containing *injection*,
   *jailbreak*, *malicious*, *unsafe* or `LABEL_1` count). *Chat model*: an
@@ -229,6 +235,11 @@ one field group per model:
 - **Each group** has a *Save and test* button: it saves the page, then sends one fixed harmless request, showing the answer, the
   model that answered, and the duration.
 - **Each key** is stored encrypted, as today; empty keeps the saved key.
+- *Built:* each model has an **Answer within** time limit (10–900 s; main model and verifier
+  180 s, the check 60 s). A model cut off at its limit is logged with what to change.
+  Since AI calls can take minutes, the analysis runs as its own service (`pspm-analyse`,
+  every minute, working every 5 minutes or on *Run now*); reading the log
+  (`pspm-secscan`) stays every minute and is never held up by a model.
 - **The confidence threshold, reaction time and *analyse authorised actors*** stay in the
   AI card. They apply to the decisions, not to one model. *Built:* the card is called
   *AI decisions*.

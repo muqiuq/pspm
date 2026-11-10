@@ -117,7 +117,8 @@ $canOp = Auth::can('operator');
 $canAdmin = Auth::can('admin');
 
 if ($tab === 'overview'):
-    $last = DB::one('SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1');
+    $last = DB::one("SELECT * FROM scan_runs WHERE kind IN ('ingest', 'scan') ORDER BY id DESC LIMIT 1");
+    $lastA = DB::one("SELECT * FROM scan_runs WHERE kind IN ('analyse', 'scan') ORDER BY id DESC LIMIT 1");
     $fw = Status::read('firewall');
     $blocks = DB::all('SELECT * FROM blocks WHERE expires_at > now() ORDER BY created_at DESC LIMIT 300');
     $bySource = [];
@@ -130,7 +131,10 @@ if ($tab === 'overview'):
         <?php $fb = Settings::get('scan', [])['feedback_tripped'] ?? null; if ($fb && $ai['mode'] === 'dry-run'): ?>
           <div class="text-warning-emphasis">Switched to dry-run by itself at <?= h(fmt_time($fb['at'])) ?>: admins removed <?= h($fb['removed']) ?> of <?= h($fb['blocks']) ?> AI blocks
             within 7 days. Check them (AI log), then set the mode back to enforce.</div><?php endif; ?>
-        <div>Last run: <?= $last ? h(ago($last['started_at'])) . ' — ' . h($last['stats']) : 'never' ?></div>
+        <div>Log read: <?= $last ? h(ago($last['started_at'])) : 'never' ?> (every minute)</div>
+        <div>Analysis: <?= $lastA ? ($lastA['finished_at'] === null ? 'running since ' . h(ago($lastA['started_at'])) : h(ago($lastA['started_at'])) . ', took '
+            . h(human_secs(max(0, strtotime($lastA['finished_at']) - strtotime($lastA['started_at']))))) : 'never' ?> (every 5 minutes)
+          <?php if ($lastA && $lastA['stats']): ?><details class="d-inline"><summary class="d-inline text-muted">details</summary><pre class="small mb-0"><?= h($lastA['stats']) ?></pre></details><?php endif; ?></div>
         <div>AI calls in 24 h: <?= AI::callsToday() ?> / <?= h($ai['daily_cap']) ?></div>
         <?php if ($scan['breaker_tripped'] ?? false): ?><div class="text-danger mt-1">Circuit breaker tripped <?= h(ago($scan['breaker_at'] ?? null)) ?>: the scan only reports what it would block.</div>
           <?= $canAdmin ? post_button('/security', 'Reset the breaker', ['action' => 'breaker_reset'], 'btn-outline-danger btn-sm mt-1') : '' ?><?php endif; ?>

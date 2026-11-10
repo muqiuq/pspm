@@ -1,0 +1,11 @@
+[Unit]
+Description=PSPM security analysis (timer; the analysis itself runs every 5 minutes or on Run now)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=pspm-analyse.service
+
+[Install]
+WantedBy=timers.target

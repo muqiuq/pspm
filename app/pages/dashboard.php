@@ -118,9 +118,15 @@ if ($lists) {
 // Security scan
 $ai = AI::settings();
 $scanState = Settings::get('scan', []);
-$lastRun = DB::one('SELECT started_at, stats FROM scan_runs ORDER BY id DESC LIMIT 1');
+// two parts: reading the log (every minute) and the analysis (every 5 minutes, may run long with slow models)
+$lastRun = DB::one("SELECT started_at FROM scan_runs WHERE kind IN ('ingest', 'scan') ORDER BY id DESC LIMIT 1");
+$lastAnalysis = DB::one("SELECT started_at, finished_at FROM scan_runs WHERE kind IN ('analyse', 'scan') ORDER BY id DESC LIMIT 1");
 $runAge = $lastRun ? time() - strtotime($lastRun['started_at']) : null;
-$b = '<div>Mode: ' . h($ai['mode']) . ' · AI: ' . (AI::configured() ? h($ai['model']) : 'off') . '</div><div>Last run: ' . ($lastRun ? h(ago($lastRun['started_at'])) : 'never') . '</div>';
+$analysisAge = $lastAnalysis ? time() - strtotime($lastAnalysis['started_at']) : null;
+$b = '<div>Mode: ' . h($ai['mode']) . ' · AI: ' . (AI::configured() ? h($ai['model']) : 'off') . '</div>'
+    . '<div>Log read: ' . ($lastRun ? h(ago($lastRun['started_at'])) : 'never') . ' · analysis: '
+    . ($lastAnalysis ? ($lastAnalysis['finished_at'] === null ? 'running since ' . h(ago($lastAnalysis['started_at'])) : h(ago($lastAnalysis['started_at']))) : 'never') . '</div>';
+if ($analysisAge !== null && $analysisAge > 1800) $runAge = max((int)$runAge, 601);   // an analysis stuck for 30 minutes counts as a problem
 $b .= '<div>Blocks in 24 h: ' . (int)DB::val("SELECT count(*) FROM block_history WHERE created_by = 'system' AND created_at > now() - interval '24 hours'") . '</div>';
 if ($scanState['breaker_tripped'] ?? false) $b .= '<div class="text-danger">Circuit breaker tripped: dry-run until an admin resets it</div>';
 $tiles[] = tile('Security scan', ($scanState['breaker_tripped'] ?? false) ? 'red' : ($runAge === null || $runAge > 600 ? 'amber' : 'green'), $b, '/security');

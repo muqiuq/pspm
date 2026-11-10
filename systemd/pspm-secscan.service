@@ -1,5 +1,5 @@
 [Unit]
-Description=PSPM security scan (security log, AI verdicts, behaviour, honeypots)
+Description=PSPM security scan: read the security log (fast blocks, aggregates)
 After=network-online.target docker.service
 ConditionPathExists=/srv/pspm/app/current/bin/secscan.php
 

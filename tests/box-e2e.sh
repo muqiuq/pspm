@@ -78,9 +78,12 @@ php /usr/local/lib/pspm/pspm-agent.php sync >/dev/null
 n=$(ipset list pspm-feed4 | sed -n '/^Members:/,$p' | grep -c timeout)
 [[ $n == 2 ]] && ok "blocklist in the firewall: 2 entries (the private one refused)" || bad "blocklist entries: $n"
 systemctl start pspm-secscan.service; sleep 2
-st=$(runuser -u pspm -- php -r 'require "/srv/pspm/app/current/lib/bootstrap.php"; echo DB::val("SELECT stats FROM scan_runs ORDER BY id DESC LIMIT 1");')
+st=$(runuser -u pspm -- php -r 'require "/srv/pspm/app/current/lib/bootstrap.php"; echo DB::val("SELECT stats FROM scan_runs WHERE kind = '"'"'ingest'"'"' ORDER BY id DESC LIMIT 1");')
 [[ $st == *'"lines"'* ]] && ok "the scan read the real nginx security log: $st" || bad "scan: $st"
-systemctl is-active -q pspm-secscan.timer pspm-notify.timer pspm-blocklists.timer pspm-backup.timer && ok "timers active" || bad "timers"
+systemctl start pspm-analyse.service
+an=$(runuser -u pspm -- php -r 'require "/srv/pspm/app/current/lib/bootstrap.php"; echo DB::val("SELECT count(*) FROM scan_runs WHERE kind = '"'"'analyse'"'"' AND finished_at IS NOT NULL");')
+[[ $an -ge 1 ]] && ok "the analysis runs as its own service (pspm-analyse)" || bad "analysis runs: $an"
+systemctl is-active -q pspm-secscan.timer pspm-analyse.timer pspm-notify.timer pspm-blocklists.timer pspm-backup.timer && ok "timers active" || bad "timers"
 systemctl start pspm-backup.service && ls /var/lib/pspm/backups/nightly-*/db.dump >/dev/null && ok "nightly backup writes a dump" || bad "backup"
 # packages: apt-get update at most once a day, counting from the lists as they are
 systemctl is-active -q pspm-apt.timer && ok "pspm-apt.timer active (daily)" || bad "pspm-apt.timer not active"
