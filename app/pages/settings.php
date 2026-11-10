@@ -7,7 +7,19 @@ $g = Settings::global();
 $login = Settings::get('login');
 $errors = [];
 $rt = [];
-if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
+if (is_post() && in_array(post('action'), ['runtime', 'test_mail', 'test_model'], true)) {
+    if (post('action') === 'test_model') {
+        // a fixed, harmless request with the saved settings of one model; the AI log keeps it
+        $role = array_key_exists((string)post('role'), AI::ROLES) ? (string)post('role') : 'main';
+        try {
+            $t = AI::test($role);
+            flash(AI::ROLES[$role] . ': ' . ($t['ok'] ? 'answered correctly' : 'answered, but not as asked') . " in {$t['ms']} ms (model "
+                . ($t['model'] ?? '?') . '). The call is in Security → AI log.', $t['ok'] ? 'success' : 'warning');
+        } catch (Throwable $e) {
+            flash(AI::ROLES[$role] . ': ' . mb_substr($e->getMessage(), 0, 300), 'danger');
+        }
+        redirect('/settings#models');
+    }
     if (post('action') === 'test_mail') {
         $to = Validate::email((string)post('test_to'));
         $ok = $to && Notify::mail([$to], '[PSPM] Test e-mail', "This is a test from PSPM.\n", $err);
@@ -19,7 +31,9 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
     if (in_array(null, $lf, true)) $errors['login'] = 'Sign-in protection: whole numbers within range.';
     else Settings::set('login', ['max_failures' => $lf['max_failures'], 'window_secs' => $lf['window_secs'] * 60, 'ban_secs' => $lf['ban_secs'] * 3600]);
     $ai = AI::settings();
-    $ai['base_url'] = Validate::url((string)post('ai_base_url')) ?? $ai['base_url'];
+    $u = trim((string)post('ai_base_url'));
+    if ($u !== '' && ($p = AI::urlProblem($u))) $errors['ai_base_url'] = "Main model, API URL: $p";
+    else $ai['base_url'] = $u ?: AI::DEFAULTS['base_url'];
     $ai['model'] = preg_match('#^[A-Za-z0-9._:/@-]{0,100}$#', trim((string)post('ai_model'))) ? trim((string)post('ai_model')) : $ai['model'];
     if (trim((string)post('ai_key')) !== '') $ai['key_enc'] = Crypto::seal(trim((string)post('ai_key')));
     if (isset($_POST['ai_key_clear'])) $ai['key_enc'] = '';
@@ -55,7 +69,7 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
     State::publish('meta', 'certs', 'traps');
     if (!$errors) { flash('Saved. These settings take effect at once.'); redirect('/settings#runtime'); }
 }
-if (is_post() && !in_array(post('action'), ['runtime', 'test_mail'], true)) {
+if (is_post() && !in_array(post('action'), ['runtime', 'test_mail', 'test_model'], true)) {
     $in = [
         'admin_host' => post('admin_host'), 'admin_access' => (array)post('admin_access', []),
         'acme_email' => post('acme_email'),
@@ -81,6 +95,21 @@ $card = function (string $id, string $title, string $what): string {
         . '<div class="small text-muted">' . h($what) . '</div></div><div class="card-body">';
 };
 $end = '</div></div>';
+// One field group per model (docs/security-ai-improvements.md §4); $p is the field prefix.
+$modelGroup = function (string $role, string $p, string $what, array $m, array $extra = []) use ($errors): string {
+    $o = '<fieldset class="border rounded p-2 mb-3"><legend class="h6 float-none w-auto px-1 mb-1">' . h(AI::ROLES[$role]) . '</legend>'
+        . '<div class="small text-muted mb-2">' . h($what) . '</div>';
+    $o .= implode('', $extra['before'] ?? []);
+    $o .= f_text("{$p}_model", 'Model', $m['model'], [], $extra['model_help'] ?? '');
+    $o .= ($extra['same'] ?? '') . '<div class="' . h($extra['same_class'] ?? '') . '">';
+    $o .= f_text("{$p}_base_url", 'API base URL', $m['base_url'], $errors, $extra['url_help'] ?? 'OpenAI-compatible, e.g. https://openrouter.ai/api/v1', 'text', "{$p}_base_url");
+    $o .= f_text("{$p}_key", 'API key' . ($m['key_enc'] ? ' (set; empty keeps it)' : ''), '', [], 'Stored encrypted.', 'password', '', ['autocomplete' => 'new-password']);
+    $o .= $m['key_enc'] ? f_check("{$p}_key_clear", 'Remove the key', false) : '';
+    $o .= '</div><div class="row align-items-end"><div class="col-6">' . f_text("{$p}_daily_cap", 'Calls per day at most', $m['daily_cap'], [], '', 'number') . '</div>'
+        . '<div class="col-6 mb-3"><button class="btn btn-sm btn-outline-secondary" form="test-model-form" name="role" value="' . h($role) . '">Test</button>'
+        . ' <span class="small text-muted">uses the saved settings</span></div></div>';
+    return $o . '</fieldset>';
+};
 $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts', []);
 ?>
 <h1 class="h4 mb-2">Settings</h1>
@@ -89,12 +118,12 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 <nav class="section-nav small mb-4">
   <strong>Configuration:</strong> <a href="#admin-ui">Admin UI</a> · <a href="#certificates">Certificates</a> · <a href="#site-defaults">Site defaults</a> · <a href="#rate-limits">Rate limits</a>
   <span class="mx-2">|</span>
-  <strong>Runtime:</strong> <a href="#signin-protection">Sign-in protection</a> · <a href="#ai">AI</a> · <a href="#blocking">Blocking and trust</a> · <a href="#mail">E-mail</a> · <a href="#backups">Backups</a>
+  <strong>Runtime:</strong> <a href="#signin-protection">Sign-in protection</a> · <a href="#models">Models</a> · <a href="#ai">AI decisions</a> · <a href="#blocking">Blocking and trust</a> · <a href="#mail">E-mail</a> · <a href="#backups">Backups</a>
 </nav>
 
 <div class="settings-group col-xxl-10" id="configuration">
 <h2 class="h5">Configuration <span class="badge text-bg-warning align-middle">applied with install.sh</span></h2>
-<?= errors_box(array_diff_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1]) ? ['Please correct the marked fields.'] : []) ?>
+<?= errors_box(array_diff_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1]) ? ['Please correct the marked fields.'] : []) ?>
 <form method="post"><?= csrf_field() ?>
 <div class="row g-3">
   <div class="col-lg-6">
@@ -137,8 +166,9 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 
 <div class="settings-group col-xxl-10 mt-5" id="runtime">
 <h2 class="h5">Runtime <span class="badge text-bg-success align-middle">takes effect at once</span></h2>
-<?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1])) ?>
+<?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1])) ?>
 <form method="post" id="test-mail-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_mail"></form>
+<form method="post" id="test-model-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_model"></form>
 <form method="post" autocomplete="off"><?= csrf_field() ?><input type="hidden" name="action" value="runtime">
 <div class="row g-3">
   <div class="col-lg-6">
@@ -149,13 +179,12 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
         <div class="col-4"><?= f_text('ban_hours', 'ban for (h)', intdiv((int)$login['ban_secs'], 3600), [], '', 'number') ?></div>
       </div>
     <?= $end ?>
-    <?= $card('ai', 'AI', 'Security scan, behaviour findings and honeypots. Without a model the deterministic checks keep working.') ?>
-      <?= f_text('ai_base_url', 'API base URL (OpenAI-compatible)', $ai['base_url'], [], 'OpenRouter: https://openrouter.ai/api/v1') ?>
-      <?= f_text('ai_model', 'Model', $ai['model'], [], 'Empty turns the AI off.') ?>
-      <?= f_text('ai_key', 'API key' . ($ai['key_enc'] ? ' (set; empty keeps it)' : ''), '', [], 'Stored encrypted.', 'password', '', ['autocomplete' => 'new-password']) ?>
-      <?= $ai['key_enc'] ? f_check('ai_key_clear', 'Remove the key', false) : '' ?>
-      <div class="row"><div class="col-6"><?= f_text('ai_daily_cap', 'Calls per day at most', $ai['daily_cap'], [], '', 'number') ?></div>
-        <div class="col-6"><?= f_text('ai_confidence', 'Block from confidence', $ai['confidence'], [], '0.5–0.99') ?></div></div>
+    <?= $card('models', 'Models', 'One field group per model. Only pseudonymised evidence leaves the box; every call is in Security → AI log.') ?>
+      <?= $modelGroup('main', 'ai', 'Scan verdicts, behaviour assessments and honeypot proposals. Empty model: AI off; honeypots and the guards keep working.', AI::model('main'),
+          ['model_help' => 'e.g. a fast, inexpensive model']) ?>
+    <?= $end ?>
+    <?= $card('ai', 'AI decisions', 'How AI answers turn into blocks; these apply to every model.') ?>
+      <?= f_text('ai_confidence', 'Block from confidence', $ai['confidence'], [], '0.5–0.99') ?>
       <?= f_check('ai_authorised', 'Also analyse authorised actors (pseudonymised; reported, never blocked)', (bool)$ai['analyse_authorised']) ?>
       <?= f_text('reaction_hours', 'Reaction time for risky findings (hours)', $ai['reaction_hours'], [], 'No reaction within this time blocks the (untrusted) address.', 'number') ?>
     <?= $end ?>

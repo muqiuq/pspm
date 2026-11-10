@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 $u = Auth::require('viewer');
 $tab = (string)get('tab', 'overview');
-$tabs = ['overview' => 'Overview', 'behaviour' => 'Behaviour', 'traps' => 'Honeypots', 'blocklists' => 'Blocklists', 'trusted' => 'Trusted', 'verdicts' => 'AI verdicts'];
+$tabs = ['overview' => 'Overview', 'behaviour' => 'Behaviour', 'traps' => 'Honeypots', 'blocklists' => 'Blocklists', 'trusted' => 'Trusted', 'ailog' => 'AI log', 'verdicts' => 'AI verdicts'];
 if (!isset($tabs[$tab])) $tab = 'overview';
 $errors = [];
 if (is_post()) {
@@ -241,6 +241,58 @@ if ($tab === 'overview'):
       <div class="col-5"><input class="form-control form-control-sm" name="ip" placeholder="address or network"></div>
       <div class="col-4"><input class="form-control form-control-sm" name="note" placeholder="e.g. monitoring"></div>
       <div class="col-3"><button class="btn btn-sm btn-primary w-100">Trust</button></div></form><?php endif; ?>
+<?php elseif ($tab === 'ailog'):
+    // every API call of every model: what was sent, what came back, what PSPM did with it
+    $n = in_array((int)get('n'), [10, 50, 200], true) ? (int)get('n') : 10;
+    $calls = DB::all("SELECT * FROM ai_calls ORDER BY id DESC LIMIT $n");
+    $fig = [];
+    foreach (DB::all("SELECT role, count(*) AS calls, count(*) FILTER (WHERE error IS NOT NULL) AS errors, coalesce(sum(tokens_in), 0) AS tin,
+                             coalesce(sum(tokens_out), 0) AS tout, sum(cost) AS cost, round(avg(duration_ms)) AS ms
+                      FROM ai_calls WHERE at > now() - interval '24 hours' GROUP BY role") as $f) $fig[$f['role']] = $f;
+    $removed = (int)DB::val("SELECT count(*) FROM block_history WHERE source = 'ai' AND removed_by IS NOT NULL AND removed_by NOT LIKE 'system%' AND created_at > now() - interval '7 days'");
+    $aiBlocks = (int)DB::val("SELECT count(*) FROM block_history WHERE source = 'ai' AND created_at > now() - interval '7 days'");
+    $byCall = [];
+    if ($calls) foreach (DB::all('SELECT * FROM ai_verdicts WHERE call_id IN (' . implode(',', array_map('intval', array_column($calls, 'id'))) . ') ORDER BY id') as $v) $byCall[$v['call_id']][] = $v;
+    $pretty = fn($x) => h(json_encode($x, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)); ?>
+    <p class="small">Every call to an AI model, with the data as it was sent (pseudonymised), the answer, and what PSPM did with it.
+      Full requests and answers are kept for 30 days. Pseudonyms are resolved here only: the mapping never leaves the box.</p>
+    <table class="table table-sm small mb-3"><thead><tr><th>Model (24 h)</th><th>Calls / cap</th><th>Errors</th><th>Tokens in / out</th><th>Cost</th><th>Average duration</th></tr></thead><tbody>
+    <?php foreach (AI::ROLES as $role => $label): $f = $fig[$role] ?? null; $mm = AI::model($role); ?>
+      <tr><td><?= h($label) ?> <span class="text-muted"><?= h($mm['model'] ?: 'not set') ?></span></td>
+        <td><?= h($f['calls'] ?? 0) ?> / <?= h($mm['daily_cap']) ?></td><td><?= ($f['errors'] ?? 0) ? badge('red', (string)$f['errors']) : '0' ?></td>
+        <td><?= h(number_format((int)($f['tin'] ?? 0))) ?> / <?= h(number_format((int)($f['tout'] ?? 0))) ?></td>
+        <td><?= isset($f['cost']) && $f['cost'] !== null ? '$' . h(number_format((float)$f['cost'], 4)) : '—' ?></td><td><?= isset($f['ms']) ? h($f['ms']) . ' ms' : '—' ?></td></tr>
+    <?php endforeach; ?>
+    </tbody></table>
+    <p class="small">AI blocks in 7 days: <?= h($aiBlocks) ?>, removed by an admin since: <?= $removed ? badge($removed * 5 > max(1, $aiBlocks) ? 'amber' : 'grey', (string)$removed) : '0' ?>.</p>
+    <div class="small mb-2">Show the last <?php foreach ([10, 50, 200] as $k): ?><a class="<?= $k === $n ? 'fw-bold' : '' ?>" href="/security?tab=ailog&amp;n=<?= $k ?>"><?= $k ?></a> <?php endforeach; ?>calls</div>
+    <table class="table table-sm small align-middle"><thead><tr><th>When</th><th>Purpose</th><th>Model</th><th>Result</th><th>Duration</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>
+    <?php foreach ($calls as $c):
+        $res = json_dec($c['result'] ?? 'null'); $ps = json_dec($c['pseudonyms']) ?: []; $vs = $byCall[$c['id']] ?? []; ?>
+      <tr>
+        <td class="text-nowrap"><?= h(fmt_time($c['at'], 'Y-m-d H:i:s')) ?></td>
+        <td><?= h(AI::PURPOSES[$c['purpose']] ?? $c['purpose']) ?><div class="text-muted"><?= h(AI::ROLES[$c['role']] ?? $c['role']) ?></div></td>
+        <td><?= h($c['model']) ?><?= $c['model_answer'] && $c['model_answer'] !== $c['model'] ? '<div class="text-muted">answered: ' . h($c['model_answer']) . '</div>' : '' ?></td>
+        <td>
+          <?php if ($c['error']): ?><?= badge('red', 'error') ?> <span class="text-break"><?= h(mb_substr($c['error'], 0, 240)) ?></span>
+          <?php elseif ($vs): ?><ul class="list-unstyled mb-0"><?php foreach ($vs as $v): ?>
+            <li><code><?= h($v['subject']) ?></code>: <?= $v['verdict'] !== null ? h($v['verdict']) . ($v['confidence'] !== null ? ' ' . h(round((float)$v['confidence'], 2)) : '') : '<span class="text-muted">no verdict</span>' ?>
+              <?= $v['outcome'] ? '→ <strong>' . h($v['outcome']) . '</strong>' : '' ?><?= $v['reason'] ? ' <span class="text-muted">' . h(mb_substr($v['reason'], 0, 120)) . '</span>' : '' ?></li>
+          <?php endforeach; ?></ul>
+          <?php elseif ($c['purpose'] === 'test'): ?><?= ($res['ok'] ?? null) === true ? badge('green', 'ok') : badge('amber', 'unexpected answer') ?>
+          <?php else: ?><?= badge('green', 'answered') ?><?php endif; ?>
+          <details class="mt-1"><summary class="text-muted">show request and answer</summary>
+            <div class="mt-1"><strong>Sent</strong> (HTTP <?= h($c['status']) ?>)<pre class="small mb-1"><?= $pretty(json_dec($c['request'])) ?></pre>
+            <strong>Answer</strong><pre class="small mb-1"><?= h((string)$c['response']) ?></pre>
+            <?php if ($ps): ?><strong>Pseudonyms</strong> (this box only)<pre class="small mb-0"><?php foreach ($ps as $k => $real) echo h("$k = $real") . "\n"; ?></pre><?php endif; ?></div>
+          </details></td>
+        <td class="text-nowrap"><?= h($c['duration_ms']) ?> ms</td>
+        <td class="text-nowrap"><?= $c['tokens_in'] !== null ? h($c['tokens_in']) . ' / ' . h($c['tokens_out']) : '—' ?></td>
+        <td><?= $c['cost'] !== null ? '$' . h(number_format((float)$c['cost'], 5)) : '—' ?></td>
+      </tr>
+    <?php endforeach; ?>
+    <?php if (!$calls): ?><tr><td colspan="7" class="text-muted">No AI calls yet<?= AI::configured() ? '.' : ': set a main model under Settings → Models.' ?></td></tr><?php endif; ?>
+    </tbody></table>
 <?php else:
     $rows = DB::all('SELECT * FROM ai_verdicts ORDER BY id DESC LIMIT 200'); ?>
     <table class="table table-sm small"><thead><tr><th>When</th><th>Kind</th><th>Subject</th><th>Verdict</th><th>Confidence</th><th>Reason</th><th>Outcome</th><th>Evidence sent</th></tr></thead><tbody>

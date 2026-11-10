@@ -175,35 +175,54 @@ final class Behaviour
             if ($ips >= 20) $cands[] = ['pattern' => 'distributed', 'risk' => min(90, 40 + $ips), 'class' => 'risky', 'evidence' => ['addresses' => $ips],
                 'type' => 'site', 'actor' => (string)$site, 'features' => ['type' => 'site', 'req' => 0]];
         }
+        // what still needs a finding: not expected, not reported in the last 24 h
+        $todo = [];
         foreach ($cands as $c) {
             if (DB::val('SELECT 1 FROM expected_patterns WHERE actor_type = ? AND actor = ? AND pattern = ? AND until > now()', [$c['type'], $c['actor'], $c['pattern']])) continue;
             if (DB::val("SELECT 1 FROM risk_findings WHERE actor_type = ? AND actor = ? AND pattern = ? AND (status = 'open' OR created_at > now() - interval '24 hours')",
                 [$c['type'], $c['actor'], $c['pattern']])) continue;
-            $auth = self::authorised($c['type'], $c['actor']);
-            if ($auth && !$ai['analyse_authorised'] && $c['type'] !== 'ip') continue;
-            $assessment = null;
-            if (AI::available()) {
-                $ps = AI::pseudonymiser();
+            $c['auth'] = self::authorised($c['type'], $c['actor']);
+            if ($c['auth'] && !$ai['analyse_authorised'] && $c['type'] !== 'ip') continue;
+            $todo[] = $c;
+        }
+        // the AI assesses them in batches of 20 (one call each, logged in the AI log)
+        $assessments = [];
+        foreach (array_chunk($todo, 20, true) as $batch) {
+            if (!AI::available()) break;
+            $ps = AI::pseudonymiser();
+            $items = [];
+            foreach ($batch as $i => $c) {
                 $feat = $c['features'];
-                $summary = ['actor' => $ps->of($c['type'] === 'ip' ? 'ip' : $c['type'], $c['actor']), 'kind' => $c['type'], 'authorised' => $auth,
+                $items[] = ['finding' => "f-$i", 'actor' => $ps->of($c['type'] === 'ip' ? 'ip' : $c['type'], $c['actor']), 'kind' => $c['type'], 'authorised' => $c['auth'],
                     'pattern' => $c['pattern'], 'deterministic_risk' => $c['risk'], 'evidence' => $c['evidence'],
                     'requests_24h' => $feat['req'] ?? 0, 'denied' => $feat['denied'] ?? 0, 'not_found' => $feat['s404'] ?? 0,
                     'backend_401_403' => $feat['ust401'] ?? 0, 'networks' => count($feat['ips'] ?? []), 'sites' => count($feat['sites'] ?? []),
                     'paths' => array_map([AI::class, 'scrubPath'], array_slice(array_keys($feat['paths'] ?? []), 0, 25)),
                     'user_agents' => array_slice(array_keys($feat['uas'] ?? []), 0, 3)];
-                $sys = 'You assess behaviour seen by a reverse proxy over 24 hours. Classify it: "attack" (clearly malicious), "risky" '
-                    . '(should be looked at by an admin), or "normal". Answer only JSON: {"class":"attack|risky|normal","category":"' . implode('|', array_keys(self::PATTERNS))
-                    . '|other","risk":0-100,"confidence":0.0-1.0,"reason":"short","suggested_action":"short"}';
-                try {
-                    $assessment = AI::json($sys, $summary);
-                    $st['assessed']++;
-                    DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model) VALUES ('behaviour', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?)",
-                        [$c['type'] . ':' . $c['actor'], (string)($assessment['class'] ?? ''), (float)($assessment['confidence'] ?? 0), mb_substr((string)($assessment['reason'] ?? ''), 0, 500),
-                         json_enc($summary), json_enc($assessment), $ai['model']]);
-                } catch (Throwable $e) {
-                    $assessment = null;
-                }
             }
+            $sys = 'You assess behaviour seen by a reverse proxy over 24 hours. For each finding classify it: "attack" (clearly malicious), "risky" '
+                . '(should be looked at by an admin), or "normal". Answer only JSON: {"assessments":[{"finding":"f-1","class":"attack|risky|normal","category":"'
+                . implode('|', array_keys(self::PATTERNS)) . '|other","risk":0-100,"confidence":0.0-1.0,"reason":"short","suggested_action":"short"}]}';
+            try {
+                [$ans, $callId] = AI::call('main', 'behaviour', $sys, ['findings' => $items], $ps);
+            } catch (Throwable $e) {
+                break;   // the AI log has the error; the deterministic classes stand
+            }
+            foreach ((array)($ans['assessments'] ?? []) as $a) {
+                if (!is_array($a) || !preg_match('/^f-(\d+)$/', (string)($a['finding'] ?? ''), $m) || !isset($batch[(int)$m[1]]) || isset($assessments[(int)$m[1]])) continue;
+                $i = (int)$m[1];
+                $c = $batch[$i];
+                $assessments[$i] = $a;
+                $st['assessed']++;
+                $ev = array_values(array_filter($items, fn($x) => $x['finding'] === "f-$i"))[0] ?? [];
+                DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model, call_id) VALUES ('behaviour', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?)",
+                    [$c['type'] . ':' . $c['actor'], (string)($a['class'] ?? ''), (float)($a['confidence'] ?? 0), mb_substr((string)($a['reason'] ?? ''), 0, 500),
+                     json_enc($ev), json_enc($a), $ai['model'], $callId]);
+            }
+        }
+        foreach ($todo as $i => $c) {
+            $auth = $c['auth'];
+            $assessment = $assessments[$i] ?? null;
             $class = $c['class'];
             $risk = $c['risk'];
             $conf = null;

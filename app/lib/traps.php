@@ -142,11 +142,8 @@ final class Traps
             . '(e.g. /.env, /.git/config, /wp-login.php on sites without WordPress). Never propose paths a real application may serve, '
             . 'or anything a backend answered with something other than 404/410. Answer only JSON: {"patterns":[{"host":"host-1 or *",'
             . '"kind":"exact|prefix","path":"/...","reason":"short"}]}';
-        try { $ans = AI::json($sys, ['paths' => $items]); }
-        catch (Throwable $e) {
-            DB::q("INSERT INTO ai_verdicts (kind, subject, outcome, reason, model) VALUES ('mining', 'traps', 'error', ?, ?)", [mb_substr($e->getMessage(), 0, 300), AI::settings()['model']]);
-            return 0;
-        }
+        try { [$ans, $callId] = AI::call('main', 'honeypots', $sys, ['paths' => $items], $ps); }   // logged in the AI log
+        catch (Throwable $e) { return 0; }
         $window = gmdate('Y-m-d\TH:00:00\Z', intdiv(time(), 10800) * 10800);
         $n = 0;
         foreach (array_slice((array)($ans['patterns'] ?? []), 0, 50) as $p) {
@@ -160,8 +157,8 @@ final class Traps
                 $n++;
             }
         }
-        DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, answer, model, outcome) VALUES ('mining', 'traps', 'patterns', ?::jsonb, ?, ?)",
-            [json_enc($ans), AI::settings()['model'], "$n votes"]);
+        DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, answer, model, outcome, call_id) VALUES ('mining', 'traps', 'patterns', ?::jsonb, ?, ?, ?)",
+            [json_enc($ans), AI::settings()['model'], "$n votes", $callId]);
         return $n;
     }
 }

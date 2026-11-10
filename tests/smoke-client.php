@@ -93,12 +93,26 @@ check(str_contains($b, 'is ready'), 'the dashboard says the revision is ready');
 [$c, $b] = req('GET', '/settings');
 check($c === 200 && str_contains($b, 'applied with install.sh') && str_contains($b, 'takes effect at once') && str_contains($b, 'id="signin-protection"'),
     'settings: configuration and runtime sections');
-[$c, , $loc] = req('POST', '/settings', ['_csrf' => csrf($b), 'action' => 'runtime', 'max_failures' => '7', 'window_mins' => '15', 'ban_hours' => '2',
+$runtime = ['action' => 'runtime', 'max_failures' => '7', 'window_mins' => '15', 'ban_hours' => '2',
     'traps_enabled' => '1', 'pki_strict' => '1', 'ai_authorised' => '1', 'smtp_port' => '587', 'smtp_security' => 'starttls', 'ai_daily_cap' => '200', 'ai_confidence' => '0.85',
-    'reaction_hours' => '24', 'unknown_threshold' => '5', 'unknown_window' => '60', 'authorised_days' => '30', 'behaviour_hours' => '12']);
+    'reaction_hours' => '24', 'unknown_threshold' => '5', 'unknown_window' => '60', 'authorised_days' => '30', 'behaviour_hours' => '12'];
+[$c, , $loc] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime);
 [, $b] = req('GET', '/settings');
 check($c === 303 && str_contains($b, 'name="max_failures" value="7"') && str_contains($b, 'name="ban_hours" value="2"'), 'settings: sign-in protection is saved with the runtime settings');
 check(str_contains($b, 'name="behaviour_hours" value="12"'), 'settings: behaviour search every 12 hours by default');
+// Models: the main model's field group, its Test button, and the call in the AI log
+check(str_contains($b, 'id="models"') && str_contains($b, '>Main model</legend>') && str_contains($b, 'form="test-model-form" name="role" value="main"'), 'settings: Models card with the main model and a Test button');
+[$c, $b] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_base_url' => 'http://ai.example.test/v1', 'ai_model' => 'fake-main']);
+check($c === 200 && str_contains($b, 'HTTPS only (plain HTTP only for 127.0.0.1 or localhost)'), 'settings: plain HTTP refused for a remote API');
+[$c] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_base_url' => 'http://127.0.0.1:8099/v1', 'ai_model' => 'fake-main', 'ai_key' => 'fake-key']);
+[, $b] = req('GET', '/settings');
+[$c, , $loc] = req('POST', '/settings', ['_csrf' => csrf($b), 'action' => 'test_model', 'role' => 'main']);
+[, $b] = req('GET', '/settings');
+check($c === 303 && str_contains($b, 'Main model: answered correctly in') && str_contains($b, 'fake-main-2026'), 'settings: Test shows the answer, the answering model and the time');
+[$c, $b] = req('GET', '/security?tab=ailog');
+check($c === 200 && str_contains($b, '>Test<') && str_contains($b, 'fake-main') && str_contains($b, 'connection test'), 'AI log: the test call with its request');
+[, $b] = req('GET', '/settings');
+[$c] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_model' => '', 'ai_key_clear' => '1']);   // AI off again for the next checks
 [$c, $b] = req('GET', '/');
 check(str_contains($b, '<strong>2</strong> can be upgraded, <strong>1 security</strong>') && str_contains($b, 'Reboot required (linux-image-6.12.117+deb13-amd64)'),
     'dashboard: packages to upgrade, security ones, reboot required');

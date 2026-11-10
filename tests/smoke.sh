@@ -24,6 +24,7 @@ cat >"$PSPM_VAR/status/apt.json" <<JSON
               {"name": "nginx", "suite": "stable", "to": "1.26.3-3+deb13u11", "from": "1.26.3-3+deb13u10", "security": false}],
  "reboot_required": true, "reboot_packages": ["linux-image-6.12.117+deb13-amd64"], "security_since": "$(date -u +%FT%TZ)"}
 JSON
+php -S 127.0.0.1:8099 /src/tests/fake-ai.php >/tmp/fake-ai-server.log 2>&1 &   # an OpenAI-compatible fake for the AI checks
 php -S 127.0.0.1:8080 /src/app/public/index.php >/tmp/server.log 2>&1 &
 sleep 1
 ADMIN_PW=$pw php /src/tests/smoke-client.php
@@ -36,6 +37,8 @@ echo "--- PKI"
 php /src/tests/pki-check.php
 echo "--- security"
 php /src/tests/security-check.php
+echo "--- AI (fake API): log, verdicts, behaviour, errors"
+php /src/tests/ai-check.php
 echo "--- access links (site and admin UI)"
 php /src/tests/access-check.php
 echo "--- export/import"

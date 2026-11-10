@@ -22,6 +22,7 @@ for ($i = 0; $i < 40; $i++) $lines[] = $l(['ip' => '198.51.200.13', 'm' => 'POST
 $lines[] = $l(['ip' => '192.168.5.5', 'uri' => '/.env', 'nuri' => '/.env', 'out' => 'trap:1']);
 file_put_contents($log, implode("\n", $lines) . "\n");
 DB::q("INSERT INTO traps (id, host, kind, path, state, created_by) VALUES (1, '*', 'exact', '/.env', 'active', 'test') ON CONFLICT DO NOTHING");
+DB::val("SELECT setval('traps_id_seq', greatest((SELECT max(id) FROM traps), 1))");   // the fixed id above must not collide with new traps
 $r = SecScan::run(true);
 check($r['lines'] === count($lines), 'every log line was read (' . $r['lines'] . ')');
 check(Blocks::isBlocked('198.51.200.10/32'), 'trap hit is a lasting block');

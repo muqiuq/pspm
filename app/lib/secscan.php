@@ -252,6 +252,7 @@ final class SecScan
         DB::q("DELETE FROM risk_findings WHERE created_at < now() - interval '1 year'");
         DB::q("DELETE FROM scan_runs WHERE started_at < now() - interval '30 days'");
         DB::q("DELETE FROM ai_verdicts WHERE created_at < now() - interval '180 days'");
+        DB::q("DELETE FROM ai_calls WHERE at < now() - interval '30 days'");   // full requests and answers: 30 days
         DB::q("DELETE FROM expected_patterns WHERE until < now()");
 
         // candidates: untrusted addresses over a threshold in 24 h (plan §15.1)
@@ -294,16 +295,17 @@ final class SecScan
                     . 'for normal users, crawlers or monitoring. Answer only JSON: {"verdicts":[{"subject":"ip-1","verdict":"block|watch|benign",'
                     . '"confidence":0.0-1.0,"reason":"one short sentence"}]}';
                 try {
-                    $ans = AI::json($sys, ['subjects' => $subjects]);
+                    [$ans, $callId] = AI::call('main', 'scan', $sys, ['subjects' => $subjects], $ps);   // logged in the AI log
                     $stats['ai_calls']++;
                 } catch (Throwable $e) {
-                    DB::q("INSERT INTO ai_verdicts (kind, subject, outcome, reason, model) VALUES ('verdict', 'batch', 'error', ?, ?)", [mb_substr($e->getMessage(), 0, 300), $ai['model']]);
-                    break;
+                    break;   // the AI log has the error; the next round tries again
                 }
                 self::setState('last_ai_call', ['at' => gmdate('c')]);
+                $answered = [];
                 foreach ((array)($ans['verdicts'] ?? []) as $v) {
                     $cidr = $ps->reverse((string)($v['subject'] ?? ''));
-                    if (!$cidr || !isset($batch[$cidr])) continue;
+                    if (!$cidr || !isset($batch[$cidr]) || isset($answered[$cidr])) continue;
+                    $answered[$cidr] = true;
                     $verdict = in_array($v['verdict'] ?? '', ['block', 'watch', 'benign'], true) ? $v['verdict'] : 'watch';
                     $conf = max(0.0, min(1.0, (float)($v['confidence'] ?? 0)));
                     $ip = explode('/', $cidr)[0];
@@ -311,8 +313,12 @@ final class SecScan
                     $outcome = $why ?? Blocks::auto($ip, 'ai', 'AI verdict: ' . mb_substr((string)($v['reason'] ?? ''), 0, 200), $runBlocks);
                     if ($outcome === 'blocked') $stats['blocked']++;
                     $ev = array_values(array_filter($subjects, fn($s) => $s['subject'] === $v['subject']))[0] ?? [];
-                    DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model, outcome) VALUES ('verdict', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?)",
-                        [$cidr, $verdict, $conf, mb_substr((string)($v['reason'] ?? ''), 0, 500), json_enc($ev), json_enc($v), $ai['model'], $outcome]);
+                    DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model, outcome, call_id) VALUES ('verdict', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?)",
+                        [$cidr, $verdict, $conf, mb_substr((string)($v['reason'] ?? ''), 0, 500), json_enc($ev), json_enc($v), $ai['model'], $outcome, $callId]);
+                }
+                // subjects the model left out: recorded, so they are not sent again for 6 hours
+                foreach (array_diff_key($batch, $answered) as $cidr => $_) {
+                    DB::q("INSERT INTO ai_verdicts (kind, subject, outcome, model, call_id) VALUES ('verdict', ?, 'no answer', ?, ?)", [$cidr, $ai['model'], $callId]);
                 }
             }
         }
