@@ -267,7 +267,13 @@ if ($tab === 'overview'):
     $removed = (int)DB::val("SELECT count(*) FROM block_history WHERE source = 'ai' AND removed_by IS NOT NULL AND removed_by NOT LIKE 'system%' AND created_at > now() - interval '7 days'");
     $aiBlocks = (int)DB::val("SELECT count(*) FROM block_history WHERE source = 'ai' AND created_at > now() - interval '7 days'");
     $byCall = [];
-    if ($calls) foreach (DB::all('SELECT * FROM ai_verdicts WHERE call_id IN (' . implode(',', array_map('intval', array_column($calls, 'id'))) . ') ORDER BY id') as $v) $byCall[$v['call_id']][] = $v;
+    if ($calls) {
+        $ids = implode(',', array_map('intval', array_column($calls, 'id')));
+        foreach (DB::all("SELECT * FROM ai_verdicts WHERE call_id IN ($ids) OR verify_call_id IN ($ids) ORDER BY id") as $v) {
+            if ($v['call_id'] !== null) $byCall[$v['call_id']][] = $v;
+            if ($v['verify_call_id'] !== null) $byCall[$v['verify_call_id']][] = $v;   // the verifier's call shows the same lines
+        }
+    }
     $pretty = fn($x) => h(json_encode($x, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)); ?>
     <p class="small">Every call to an AI model, with the data as it was sent (pseudonymised), the answer, and what PSPM did with it.
       Full requests and answers are kept for 30 days. Pseudonyms are resolved here only: the mapping never leaves the box.</p>
@@ -281,7 +287,11 @@ if ($tab === 'overview'):
         <td><?= isset($f['cost']) && $f['cost'] !== null ? '$' . h(number_format((float)$f['cost'], 4)) : '—' ?></td><td><?= isset($f['ms']) ? h($f['ms']) . ' ms' : '—' ?></td></tr>
     <?php endforeach; ?>
     </tbody></table>
-    <p class="small">AI blocks in 7 days: <?= h($aiBlocks) ?>, removed by an admin since: <?= $removed ? badge($removed * 5 > max(1, $aiBlocks) ? 'amber' : 'grey', (string)$removed) : '0' ?>.</p>
+    <?php $agree = DB::one("SELECT count(*) FILTER (WHERE verify_verdict IS NOT NULL) AS asked,
+                                   count(*) FILTER (WHERE verify_verdict IN ('block', 'attack')) AS agreed
+                            FROM ai_verdicts WHERE kind IN ('verdict', 'behaviour') AND created_at > now() - interval '7 days'"); ?>
+    <p class="small">AI blocks in 7 days: <?= h($aiBlocks) ?>, removed by an admin since: <?= $removed ? badge($removed * 5 > max(1, $aiBlocks) ? 'amber' : 'grey', (string)$removed) : '0' ?>.
+      <?php if ((int)$agree['asked']): ?>The verification model agreed on <?= h($agree['agreed']) ?> of <?= h($agree['asked']) ?> blocks in 7 days.<?php endif; ?></p>
     <div class="small mb-2">Show the last <?php foreach ([10, 50, 200] as $k): ?><a class="<?= $k === $n ? 'fw-bold' : '' ?>" href="/security?tab=ailog&amp;n=<?= $k ?>"><?= $k ?></a> <?php endforeach; ?>calls</div>
     <table class="table table-sm small align-middle"><thead><tr><th>When</th><th>Purpose</th><th>Model</th><th>Result</th><th>Duration</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>
     <?php foreach ($calls as $c):
@@ -294,6 +304,7 @@ if ($tab === 'overview'):
           <?php if ($c['error']): ?><?= badge('red', 'error') ?> <span class="text-break"><?= h(mb_substr($c['error'], 0, 240)) ?></span>
           <?php elseif ($vs): ?><ul class="list-unstyled mb-0"><?php foreach ($vs as $v): ?>
             <li><code><?= h($v['subject']) ?></code>: <?= $v['verdict'] !== null ? h($v['verdict']) . ($v['confidence'] !== null ? ' ' . h(round((float)$v['confidence'], 2)) : '') : '<span class="text-muted">no verdict</span>' ?>
+              <?= $v['verify_verdict'] !== null ? '· verifier: ' . h($v['verify_verdict']) . ($v['verify_confidence'] !== null ? ' ' . h(round((float)$v['verify_confidence'], 2)) : '') . ' ' : '' ?>
               <?= $v['outcome'] ? '→ <strong>' . h($v['outcome']) . '</strong>' : '' ?><?= !empty(json_dec($v['evidence'])['injection_attempted']) ? ' ' . badge('amber', 'injection removed') : '' ?>
               <?= $v['reason'] ? ' <span class="text-muted">' . h(mb_substr($v['reason'], 0, 120)) . '</span>' : '' ?></li>
           <?php endforeach; ?></ul>

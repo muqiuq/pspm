@@ -8,7 +8,7 @@
 //   scan verdicts: exploit tags → block 0.95; 21 not-found pages → left out of the answer;
 //                  a user agent saying "ignore …" fools it → benign 0.99 (what the injection check prevents)
 //   behaviour:     brute force with risk ≥ 90 → attack 0.9, else risky 0.7
-//   honeypots:     /.env and /wp-login.php → exact patterns
+//   honeypots:     /.env and /wp-login.php → exact patterns; the verifier confirms them (fake-benign rejects)
 //   test:          {"ok": true}
 declare(strict_types=1);
 
@@ -58,11 +58,15 @@ if (str_contains($system, 'connection test')) {
 } elseif (str_contains($system, 'assess behaviour')) {
     $a = [];
     foreach ($user['findings'] ?? [] as $f) {
+        if ($model === 'fake-benign') { $a[] = ['finding' => $f['finding'], 'class' => 'normal', 'risk' => 5, 'confidence' => 0.9, 'reason' => 'normal use']; continue; }
         $attack = ($f['pattern'] ?? '') === 'brute_force' && ($f['deterministic_risk'] ?? 0) >= 90;
         $a[] = ['finding' => $f['finding'], 'class' => $attack ? 'attack' : 'risky', 'category' => $f['pattern'] ?? 'other',
             'risk' => $attack ? 95 : 60, 'confidence' => $attack ? 0.9 : 0.7, 'reason' => $attack ? 'credential stuffing' : 'worth a look', 'suggested_action' => 'check'];
     }
     $answer = ['assessments' => $a];
+} elseif (str_contains($system, 'review honeypot rules')) {
+    // the verifier on trap proposals: fake-benign rejects every one
+    $answer = ['decisions' => array_map(fn($x) => ['p' => $x['p'], 'decision' => $model === 'fake-benign' ? 'reject' : 'confirm', 'reason' => 'checked'], $user['proposals'] ?? [])];
 } elseif (str_contains($system, 'honeypot rules')) {
     $p = [];
     foreach ($user['paths'] ?? [] as $x) {

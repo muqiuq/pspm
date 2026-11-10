@@ -18,6 +18,7 @@ final class Behaviour
         'probing' => 'Probing beyond its scope',
         'changed' => 'Changed behaviour',
         'distributed' => 'Distributed attack on one site',
+        'ai_disputed' => 'AI models disagree on a block',
     ];
 
     /** Sum the hourly feature rows of the last $hours for every actor. */
@@ -186,10 +187,11 @@ final class Behaviour
             $todo[] = $c;
         }
         // the AI assesses them in batches of 20 (one call each, logged in the AI log)
-        $assessments = [];
+        $assessments = $shielded = $rowIds = [];
+        $ps = AI::pseudonymiser();   // one for every batch, so the verifier sees the same pseudonyms
+        $sys = '';
         foreach (array_chunk($todo, 20, true) as $batch) {
             if (!AI::available()) break;
-            $ps = AI::pseudonymiser();
             $items = [];
             foreach ($batch as $i => $c) {
                 $feat = $c['features'];
@@ -216,9 +218,39 @@ final class Behaviour
                 $assessments[$i] = $a;
                 $st['assessed']++;
                 $ev = array_values(array_filter($items, fn($x) => $x['finding'] === "f-$i"))[0] ?? [];
-                DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model, call_id) VALUES ('behaviour', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?)",
+                $shielded[$i] = $ev;
+                $rowIds[$i] = (int)DB::val("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model, call_id) VALUES ('behaviour', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?) RETURNING id",
                     [$c['type'] . ':' . $c['actor'], (string)($a['class'] ?? ''), (float)($a['confidence'] ?? 0), mb_substr((string)($a['reason'] ?? ''), 0, 500),
                      json_enc($ev), json_enc($a), $ai['model'], $callId]);
+            }
+        }
+        // the verifier confirms every immediate block (docs/security-ai-improvements.md §3)
+        $verified = [];
+        $verifyFailed = false;
+        $toVerify = [];
+        if (AI::configured('verify')) {
+            foreach ($todo as $i => $c) {
+                $a = $assessments[$i] ?? null;
+                if (!$a || ($a['class'] ?? '') !== 'attack' || $c['type'] !== 'ip' || $c['auth'] || !isset($shielded[$i])) continue;
+                if (Blocks::guard(explode('/', $c['actor'])[0], 'block', (float)($a['confidence'] ?? 0)) === null) $toVerify[$i] = $shielded[$i];
+            }
+        }
+        if ($toVerify) {
+            $verifyCall = null;
+            try {
+                if (!AI::available('verify')) throw new RuntimeException('verification model not available');
+                [$vans, $verifyCall] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['findings' => array_values($toVerify)], $ps);
+                foreach ((array)($vans['assessments'] ?? []) as $x) {
+                    if (!is_array($x) || !preg_match('/^f-(\d+)$/', (string)($x['finding'] ?? ''), $m) || !isset($toVerify[(int)$m[1]]) || isset($verified[(int)$m[1]])) continue;
+                    $verified[(int)$m[1]] = ['class' => (string)($x['class'] ?? ''), 'confidence' => max(0.0, min(1.0, (float)($x['confidence'] ?? 0))), 'reason' => (string)($x['reason'] ?? '')];
+                }
+            } catch (Throwable) {
+                $verifyFailed = true;   // the AI log has the error; no immediate block
+            }
+            foreach ($toVerify as $i => $_) {
+                $vv = $verified[$i] ?? null;
+                DB::q('UPDATE ai_verdicts SET verify_verdict = ?, verify_confidence = ?, verify_reason = ?, verify_model = ?, verify_call_id = ? WHERE id = ?',
+                    [$vv['class'] ?? 'error', $vv['confidence'] ?? null, isset($vv['reason']) ? mb_substr($vv['reason'], 0, 500) : null, AI::model('verify')['model'], $verifyCall, $rowIds[$i]]);
             }
         }
         foreach ($todo as $i => $c) {
@@ -239,8 +271,11 @@ final class Behaviour
                 $ip = explode('/', $c['actor'])[0];
                 if ($class === 'attack') {
                     $why = Blocks::guard($ip, 'block', $conf ?? 0.0);
-                    if ($why === null && Blocks::auto($ip, 'behaviour', self::PATTERNS[$c['pattern']] . ' (attack)', $runBlocks) === 'blocked') { $status = 'blocked'; $st['blocked']++; }
-                    elseif ($why !== null || $conf === null) $deadline = gmdate('c', time() + 3600 * (int)$ai['reaction_hours']);
+                    $vv = $verified[$i] ?? null;
+                    $ok = !isset($toVerify[$i]) || ($vv && $vv['class'] === 'attack' && $vv['confidence'] >= (float)$ai['confidence']);   // the verifier agrees
+                    if (isset($toVerify[$i])) $assessment['verifier'] = $vv ?? ['error' => $verifyFailed ? 'no answer from the verification model' : 'not in the answer'];
+                    if ($why === null && $ok && Blocks::auto($ip, 'behaviour', self::PATTERNS[$c['pattern']] . ' (attack' . ($vv ? ', verified' : '') . ')', $runBlocks) === 'blocked') { $status = 'blocked'; $st['blocked']++; }
+                    elseif ($why !== null || $conf === null || !$ok) $deadline = gmdate('c', time() + 3600 * (int)$ai['reaction_hours']);
                 } else {
                     $deadline = gmdate('c', time() + 3600 * (int)$ai['reaction_hours']);
                 }

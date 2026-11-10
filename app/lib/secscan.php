@@ -306,7 +306,7 @@ final class SecScan
                     break;   // the AI log has the error; the next round tries again
                 }
                 self::setState('last_ai_call', ['at' => gmdate('c')]);
-                $answered = [];
+                $answered = $entries = [];
                 foreach ((array)($ans['verdicts'] ?? []) as $v) {
                     $cidr = $ps->reverse((string)($v['subject'] ?? ''));
                     if (!$cidr || !isset($batch[$cidr]) || isset($answered[$cidr])) continue;
@@ -314,12 +314,29 @@ final class SecScan
                     $verdict = in_array($v['verdict'] ?? '', ['block', 'watch', 'benign'], true) ? $v['verdict'] : 'watch';
                     $conf = max(0.0, min(1.0, (float)($v['confidence'] ?? 0)));
                     $ip = explode('/', $cidr)[0];
-                    $why = Blocks::guard($ip, $verdict, $conf);
-                    $outcome = $why ?? Blocks::auto($ip, 'ai', 'AI verdict: ' . mb_substr((string)($v['reason'] ?? ''), 0, 200), $runBlocks);
-                    if ($outcome === 'blocked') $stats['blocked']++;
                     $ev = array_values(array_filter($subjects, fn($s) => $s['subject'] === $v['subject']))[0] ?? [];
-                    DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model, outcome, call_id) VALUES ('verdict', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?)",
-                        [$cidr, $verdict, $conf, mb_substr((string)($v['reason'] ?? ''), 0, 500), json_enc($ev), json_enc($v), $ai['model'], $outcome, $callId]);
+                    $entries[$cidr] = ['v' => $v, 'verdict' => $verdict, 'conf' => $conf, 'ip' => $ip, 'ev' => $ev, 'why' => Blocks::guard($ip, $verdict, $conf)];
+                }
+                // the verifier: an independent second opinion on every block (same evidence, not the first verdict)
+                $toVerify = array_filter($entries, fn($e) => $e['why'] === null);
+                [$second, $verifyCall, $verifyFailed] = AI::configured('verify') && $toVerify
+                    ? self::verify(array_values(array_map(fn($e) => $e['ev'], $toVerify)), $sys, $ps) : [[], null, false];
+                foreach ($entries as $cidr => $e) {
+                    $vv = $second[$cidr] ?? null;
+                    $outcome = $e['why'];
+                    if ($outcome === null) {
+                        $confirmed = $vv && $vv['verdict'] === 'block' && $vv['confidence'] >= (float)$ai['confidence'];
+                        $outcome = AI::configured('verify') && !$confirmed
+                            ? self::dispute($cidr, $e, $vv, $verifyFailed)   // no automatic block: a finding with a reaction deadline
+                            : Blocks::auto($e['ip'], 'ai', 'AI verdict: ' . mb_substr((string)($e['v']['reason'] ?? ''), 0, 200) . ($vv ? ' (verified)' : ''), $runBlocks);
+                    }
+                    if ($outcome === 'blocked') $stats['blocked']++;
+                    DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, confidence, reason, evidence, answer, model, outcome, call_id,
+                               verify_verdict, verify_confidence, verify_reason, verify_model, verify_call_id)
+                           VALUES ('verdict', ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [$cidr, $e['verdict'], $e['conf'], mb_substr((string)($e['v']['reason'] ?? ''), 0, 500), json_enc($e['ev']), json_enc($e['v']), $ai['model'], $outcome, $callId,
+                         $vv['verdict'] ?? ($verifyFailed && isset($toVerify[$cidr]) ? 'error' : null), $vv['confidence'] ?? null, isset($vv['reason']) ? mb_substr($vv['reason'], 0, 500) : null,
+                         isset($toVerify[$cidr]) && AI::configured('verify') ? AI::model('verify')['model'] : null, isset($toVerify[$cidr]) ? $verifyCall : null]);
                 }
                 // subjects the model left out: recorded, so they are not sent again for 6 hours
                 foreach (array_diff_key($batch, $answered) as $cidr => $_) {
@@ -331,5 +348,49 @@ final class SecScan
         $stats['traps'] = Traps::maintain($runNow);
         State::publish('blocked', 'trusted', 'cleared', 'traps', 'meta');
         return $stats;
+    }
+
+    /**
+     * The verifier's verdicts on block candidates (docs/security-ai-improvements.md §3).
+     * @return array{0: array<string, array{verdict: string, confidence: float, reason: string}>, 1: ?int, 2: bool} by subject, call id, failed
+     */
+    private static function verify(array $subjects, string $sys, object $ps): array
+    {
+        if (!AI::available('verify')) return [[], null, true];
+        try {
+            [$ans, $id] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['subjects' => $subjects], $ps);
+        } catch (Throwable) {
+            return [[], null, true];   // the AI log has the error
+        }
+        $out = [];
+        foreach ((array)($ans['verdicts'] ?? []) as $x) {
+            $cidr = is_array($x) ? $ps->reverse((string)($x['subject'] ?? '')) : null;
+            if (!$cidr || isset($out[$cidr])) continue;
+            $out[$cidr] = ['verdict' => in_array($x['verdict'] ?? '', ['block', 'watch', 'benign'], true) ? $x['verdict'] : 'watch',
+                'confidence' => max(0.0, min(1.0, (float)($x['confidence'] ?? 0))), 'reason' => (string)($x['reason'] ?? '')];
+        }
+        return [$out, $id, false];
+    }
+
+    /**
+     * The models disagree on a block, or the verifier did not answer: no automatic block, but a
+     * finding with the normal reaction deadline (an untrusted address is blocked when nobody reacts).
+     */
+    private static function dispute(string $cidr, array $e, ?array $vv, bool $failed): string
+    {
+        $outcome = $failed || !$vv ? 'not verified' : 'disputed';
+        if (DB::val("SELECT 1 FROM risk_findings WHERE actor_type = 'ip' AND actor = ? AND pattern = 'ai_disputed' AND status = 'open'", [$cidr])) return $outcome;
+        $ai = AI::settings();
+        $deadline = gmdate('c', time() + 3600 * (int)$ai['reaction_hours']);
+        $evidence = ['main' => ['model' => $ai['model'], 'verdict' => $e['verdict'], 'confidence' => $e['conf'], 'reason' => (string)($e['v']['reason'] ?? '')],
+            'verifier' => $vv ? ['model' => AI::model('verify')['model']] + $vv : ['error' => 'no answer from the verification model']];
+        $id = (int)DB::val("INSERT INTO risk_findings (actor_type, actor, pattern, class, risk, confidence, authorised, status, deadline, evidence, ai)
+            VALUES ('ip', ?, 'ai_disputed', 'risky', ?, ?, false, 'open', ?, ?::jsonb, ?::jsonb) RETURNING id",
+            [$cidr, (int)round(100 * $e['conf']), $e['conf'], $deadline, json_enc($evidence), json_enc($e['v'])]);
+        Notify::event('findings', ($outcome === 'disputed' ? 'AI models disagree' : 'Block not verified') . " — address $cidr",
+            "Finding #$id: the main model wants to block $cidr (" . $e['verdict'] . ', ' . round($e['conf'], 2) . '): ' . ($e['v']['reason'] ?? '') . "\n"
+            . ($vv ? "The verification model says {$vv['verdict']} (" . round($vv['confidence'], 2) . "): {$vv['reason']}" : 'The verification model did not answer.')
+            . "\n\nNobody reacted: the address is blocked at " . fmt_time($deadline, 'Y-m-d H:i') . '. React on Security → Behaviour.', "finding:$id");
+        return $outcome;
     }
 }

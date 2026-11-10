@@ -104,6 +104,7 @@ check(str_contains($b, 'name="behaviour_hours" value="12"'), 'settings: behaviou
 check(str_contains($b, 'id="models"') && str_contains($b, '>Main model</legend>') && str_contains($b, 'form="test-model-form" name="role" value="main"'), 'settings: Models card with the main model and a Test button');
 check(str_contains($b, '>Injection check</legend>') && str_contains($b, 'name="check_type"') && str_contains($b, 'name="check_threshold"') && str_contains($b, 'value="check">Test'),
     'settings: the injection check has its own fields and Test button');
+check(str_contains($b, '>Verification model</legend>') && str_contains($b, 'name="verify_same"') && str_contains($b, 'value="verify">Test'), 'settings: the verifier has its own fields and Test button');
 [$c, $b] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_base_url' => 'http://ai.example.test/v1', 'ai_model' => 'fake-main']);
 check($c === 200 && str_contains($b, 'HTTPS only (plain HTTP only for 127.0.0.1 or localhost)'), 'settings: plain HTTP refused for a remote API');
 [$c] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_base_url' => 'http://127.0.0.1:8099/v1', 'ai_model' => 'fake-main', 'ai_key' => 'fake-key']);

@@ -13,8 +13,13 @@ final class AI
 {
     public const DEFAULTS = ['base_url' => 'https://openrouter.ai/api/v1', 'model' => '', 'key_enc' => '', 'mode' => 'enforce',
         'daily_cap' => 200, 'min_interval_min' => 15, 'confidence' => 0.85, 'analyse_authorised' => true, 'reaction_hours' => 24];
-    public const ROLES = ['main' => 'Main model', 'check' => 'Injection check'];
-    public const PURPOSES = ['scan' => 'Scan verdicts', 'behaviour' => 'Behaviour', 'honeypots' => 'Honeypots', 'check' => 'Injection check', 'test' => 'Test'];
+    public const ROLES = ['main' => 'Main model', 'check' => 'Injection check', 'verify' => 'Verification model'];
+    public const PURPOSES = ['scan' => 'Scan verdicts', 'behaviour' => 'Behaviour', 'honeypots' => 'Honeypots', 'check' => 'Injection check',
+        'verify' => 'Verification', 'test' => 'Test'];
+    /** The verifier: an independent second opinion on every automatic block (docs/security-ai-improvements.md §3). */
+    public const VERIFY_DEFAULTS = ['model' => '', 'base_url' => '', 'key_enc' => '', 'same_as_main' => true, 'daily_cap' => 200];
+    /** Added to the verifier's instructions: blocks hurt real users. */
+    public const VERIFY_NOTE = ' You are an independent, cautious reviewer: a block shuts out real users, so decide for a block only when the evidence clearly shows an attack.';
     /** The injection check: a classifier API ({"inputs": [...]}, Hugging Face style) or a chat model with a typed answer. */
     public const CHECK_DEFAULTS = ['type' => 'classifier', 'model' => '', 'base_url' => '', 'key_enc' => '', 'same_as_main' => false,
         'daily_cap' => 2000, 'threshold' => 0.5];
@@ -39,6 +44,12 @@ final class AI
             if ($c['type'] === 'chat' && $c['same_as_main']) { $c['base_url'] = $main['base_url']; $c['key_enc'] = $main['key_enc']; }
             return ['role' => 'check', 'model' => (string)$c['model'], 'base_url' => (string)$c['base_url'], 'key_enc' => (string)$c['key_enc'],
                 'daily_cap' => (int)$c['daily_cap'], 'type' => (string)$c['type'], 'threshold' => (float)$c['threshold'], 'same_as_main' => (bool)$c['same_as_main']];
+        }
+        if ($role === 'verify') {
+            $v = array_replace(self::VERIFY_DEFAULTS, (array)Settings::get('ai_verify', []));
+            if ($v['same_as_main']) { $v['base_url'] = $main['base_url']; $v['key_enc'] = $main['key_enc']; }
+            return ['role' => 'verify', 'model' => (string)$v['model'], 'base_url' => (string)$v['base_url'], 'key_enc' => (string)$v['key_enc'],
+                'daily_cap' => (int)$v['daily_cap'], 'same_as_main' => (bool)$v['same_as_main']];
         }
         throw new InvalidArgumentException("Unknown model role $role");
     }

@@ -117,5 +117,61 @@ check(!$ran && $items[0]['untrusted']['paths'] === [['/ok/path.php', 3]] && $ite
     'then only path-shaped paths are sent; encoded text and user agents are left out');
 
 Settings::set('ai_check', AI::CHECK_DEFAULTS);
+
+// ---- the verifier (docs/security-ai-improvements.md §3)
+$setVerify = fn(string $model) => Settings::set('ai_verify', array_replace(AI::VERIFY_DEFAULTS, ['model' => $model, 'same_as_main' => true]));
+$scanOne = function (string $ip, string $uri) use ($lines) {
+    $rows = [];
+    for ($i = 0; $i < 12; $i++) $rows[] = ['ip' => $ip, 'uri' => $uri];
+    $lines($rows);
+    SecScan::run(true);
+    return DB::one('SELECT * FROM ai_verdicts WHERE subject = ? ORDER BY id DESC LIMIT 1', ["$ip/32"]);
+};
+$setVerify('fake-verify');
+$v = $scanOne('198.51.202.1', '/.env');
+check(Blocks::isBlocked('198.51.202.1/32') && $v['verify_verdict'] === 'block' && $v['verify_call_id'] !== null, 'both models say block: blocked, the verifier\'s verdict is recorded');
+$vc = DB::one('SELECT * FROM ai_calls WHERE id = ?', [$v['verify_call_id']]);
+check($vc['role'] === 'verify' && !str_contains($vc['request'], '"verdict"') && str_contains($vc['request'], 'independent, cautious reviewer'),
+    'the verifier gets the same evidence, not the first verdict');
+$setVerify('fake-benign');
+$v = $scanOne('198.51.202.2', '/.git/config');
+$f = DB::one("SELECT * FROM risk_findings WHERE actor = '198.51.202.2/32' AND pattern = 'ai_disputed'");
+check(!Blocks::isBlocked('198.51.202.2/32') && $v['outcome'] === 'disputed' && $f && $f['status'] === 'open' && $f['deadline'] !== null,
+    'the verifier disagrees: no block, a finding with the reaction deadline');
+$fe = json_dec($f['evidence']);
+check(($fe['main']['verdict'] ?? '') === 'block' && ($fe['verifier']['verdict'] ?? '') === 'benign', 'the finding shows both verdicts');
+DB::q("UPDATE risk_findings SET deadline = now() - interval '1 minute' WHERE id = ?", [$f['id']]);
+$n = 0; Behaviour::analyse($n, false);
+check(Blocks::isBlocked('198.51.202.2/32'), 'nobody reacted to the disagreement: blocked at the deadline');
+$setVerify('fake-500');
+$v = $scanOne('198.51.202.3', '/.env');
+check(!Blocks::isBlocked('198.51.202.3/32') && $v['outcome'] === 'not verified' && $v['verify_verdict'] === 'error', 'the verifier fails: no automatic block ("not verified")');
+// behaviour: an immediate "attack" block needs the verifier too
+$brute = function (string $ip) use ($lines) {
+    $rows = [];
+    for ($i = 0; $i < 120; $i++) $rows[] = ['ip' => $ip, 'm' => 'POST', 'uri' => '/login', 'st' => '401', 'ust' => '401', 'out' => 'public'];
+    $lines($rows);
+    SecScan::run(true);
+};
+$setVerify('fake-benign');
+$brute('198.51.202.4');
+$f = DB::one("SELECT * FROM risk_findings WHERE actor = '198.51.202.4/32' AND pattern = 'brute_force'");
+check(!Blocks::isBlocked('198.51.202.4/32') && $f && $f['deadline'] !== null && (json_dec($f['ai'])['verifier']['class'] ?? '') === 'normal',
+    'behaviour: the verifier disagrees with "attack": no immediate block, the deadline stands');
+$setVerify('fake-verify');
+$brute('198.51.202.5');
+check(Blocks::isBlocked('198.51.202.5/32'), 'behaviour: both say attack: blocked at once');
+// honeypot proposals count only when the verifier confirms them
+DB::q("DELETE FROM traps WHERE created_by = 'ai'");
+$setVerify('fake-benign');
+Traps::maintain(true);
+check(!DB::val("SELECT 1 FROM traps WHERE created_by = 'ai'") && (bool)DB::val("SELECT 1 FROM ai_verdicts WHERE kind = 'mining' AND outcome LIKE '%not confirmed by the verifier%'"),
+    'honeypots: proposals the verifier rejects get no vote');
+DB::q("DELETE FROM trap_votes"); DB::q("DELETE FROM scan_state WHERE key = 'last_mining'");
+$setVerify('fake-verify');
+Traps::maintain(true);
+check((int)DB::val("SELECT votes FROM traps WHERE path = '/wp-login.php' AND created_by = 'ai'") >= 1, 'honeypots: confirmed proposals get their vote');
+Settings::set('ai_verify', AI::VERIFY_DEFAULTS);
+
 $ai = AI::settings(); $ai['model'] = ''; Settings::set('ai', $ai);
 echo "ai checks passed\n";

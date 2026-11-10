@@ -55,6 +55,17 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail', 'test_model']
     $ck['daily_cap'] = Validate::int(post('check_daily_cap'), 1, 100000) ?? $ck['daily_cap'];
     $ck['threshold'] = max(0.05, min(0.99, (float)post('check_threshold', $ck['threshold'])));
     Settings::set('ai_check', $ck);
+    // the verifier
+    $vf = array_replace(AI::VERIFY_DEFAULTS, (array)Settings::get('ai_verify', []));
+    $vf['model'] = preg_match('#^[A-Za-z0-9._:/@-]{0,100}$#', trim((string)post('verify_model'))) ? trim((string)post('verify_model')) : $vf['model'];
+    $vf['same_as_main'] = isset($_POST['verify_same']);
+    $u = trim((string)post('verify_base_url'));
+    if ($u !== '' && ($p = AI::urlProblem($u))) $errors['verify_base_url'] = "Verification model, API URL: $p";
+    else $vf['base_url'] = $u;
+    if (trim((string)post('verify_key')) !== '') $vf['key_enc'] = Crypto::seal(trim((string)post('verify_key')));
+    if (isset($_POST['verify_key_clear'])) $vf['key_enc'] = '';
+    $vf['daily_cap'] = Validate::int(post('verify_daily_cap'), 1, 100000) ?? $vf['daily_cap'];
+    Settings::set('ai_verify', $vf);
     Settings::set('unknown_hosts', ['threshold' => Validate::int(post('unknown_threshold'), 0, 1000) ?? 5, 'window' => 60 * (Validate::int(post('unknown_window'), 1, 1440) ?? 60)]);
     Settings::set('traps', ['enabled' => isset($_POST['traps_enabled'])]);
     Settings::set('trust', ['authorised_days' => Validate::int(post('authorised_days'), 1, 365) ?? 30]);
@@ -137,7 +148,7 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 
 <div class="settings-group col-xxl-10" id="configuration">
 <h2 class="h5">Configuration <span class="badge text-bg-warning align-middle">applied with install.sh</span></h2>
-<?= errors_box(array_diff_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1]) ? ['Please correct the marked fields.'] : []) ?>
+<?= errors_box(array_diff_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1, 'verify_base_url' => 1]) ? ['Please correct the marked fields.'] : []) ?>
 <form method="post"><?= csrf_field() ?>
 <div class="row g-3">
   <div class="col-lg-6">
@@ -180,7 +191,7 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 
 <div class="settings-group col-xxl-10 mt-5" id="runtime">
 <h2 class="h5">Runtime <span class="badge text-bg-success align-middle">takes effect at once</span></h2>
-<?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1])) ?>
+<?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1, 'verify_base_url' => 1])) ?>
 <form method="post" id="test-mail-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_mail"></form>
 <form method="post" id="test-model-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_model"></form>
 <form method="post" autocomplete="off"><?= csrf_field() ?><input type="hidden" name="action" value="runtime">
@@ -206,6 +217,11 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
           'url_help' => 'Classifier: the full URL that takes {"inputs": [...]}. Chat: the OpenAI-compatible base URL.',
           'same' => f_check('check_same', 'Chat: same API URL and key as the main model', $ck['same_as_main']),
           'after' => [f_text('check_threshold', 'Injection from score', $ck['threshold'], [], '0.05–0.99; the score is the probability of an injection')]]) ?>
+      <?php $vf = AI::model('verify'); ?>
+      <?= $modelGroup('verify', 'verify', 'An independent second opinion on every automatic block, with the same evidence but not the first verdict. Both must say block; '
+          . 'if they disagree, the address becomes a finding with the reaction time. Honeypot proposals count only when it agrees. Empty: off, as before.', $vf, [
+          'model_help' => 'Best from another model family than the main model, e.g. a stronger one. Empty: off.',
+          'same' => f_check('verify_same', 'Same API URL and key as the main model', $vf['same_as_main'])]) ?>
     <?= $end ?>
     <?= $card('ai', 'AI decisions', 'How AI answers turn into blocks; these apply to every model.') ?>
       <?= f_text('ai_confidence', 'Block from confidence', $ai['confidence'], [], '0.5–0.99') ?>
