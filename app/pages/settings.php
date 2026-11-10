@@ -27,6 +27,8 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
     if (isset($_POST['ai_key_clear'])) $ai['key_enc'] = '';
     $ai['daily_cap'] = Validate::int(post('ai_daily_cap'), 1, 10000) ?? $ai['daily_cap'];
     $ai['timeout'] = Validate::int(post('ai_timeout'), 10, 900) ?? $ai['timeout'];
+    $ai['batch'] = Validate::int(post('ai_batch'), 1, 50) ?? $ai['batch'];
+    $ai['round_budget'] = 60 * (Validate::int(post('round_minutes'), 1, 60) ?? intdiv((int)$ai['round_budget'], 60));
     $ai['confidence'] = max(0.5, min(0.99, (float)post('ai_confidence', $ai['confidence'])));
     $ai['analyse_authorised'] = isset($_POST['ai_authorised']);
     $ai['reaction_hours'] = Validate::int(post('reaction_hours'), 1, 720) ?? $ai['reaction_hours'];
@@ -209,7 +211,9 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
     <?= $end ?>
     <?= $card('models', 'Models', 'One field group per model. Only pseudonymised evidence leaves the box; every call is in Security → AI log.') ?>
       <?= $modelGroup('main', 'ai', 'Scan verdicts, behaviour assessments and honeypot proposals. Empty model: AI off; honeypots and the guards keep working.', AI::model('main'),
-          ['model_help' => 'e.g. a fast, inexpensive model']) ?>
+          ['model_help' => 'e.g. a fast, inexpensive model',
+           'after' => [f_text('ai_batch', 'Items per request', $ai['batch'], [], 'Addresses or findings per call (honeypot mining: 6 × as many paths); a request also stops at about 12 KB. '
+               . 'Smaller requests answer faster. The verifier gets the same batches. 1–50.', 'number')]]) ?>
       <?php $ck = AI::model('check'); ?>
       <?= $modelGroup('check', 'check', 'Screens every attacker-written string (paths, user agents) before a model sees it. Its answer has one fixed type, '
           . '{label: safe|injection, score}; anything else counts as injection. Flagged strings are removed and the address is tagged. Off or failing: '
@@ -229,6 +233,7 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
       <?= f_text('ai_confidence', 'Block from confidence', $ai['confidence'], [], '0.5–0.99') ?>
       <?= f_check('ai_authorised', 'Also analyse authorised actors (pseudonymised; reported, never blocked)', (bool)$ai['analyse_authorised']) ?>
       <?= f_text('reaction_hours', 'Reaction time for risky findings (hours)', $ai['reaction_hours'], [], 'No reaction within this time blocks the (untrusted) address.', 'number') ?>
+      <?= f_text('round_minutes', 'AI time per analysis round (minutes)', intdiv((int)$ai['round_budget'], 60), [], 'After this, no new batch starts; the rest comes back in the next round (every 5 minutes). 1–60.', 'number') ?>
     <?= $end ?>
   </div>
   <div class="col-lg-6">

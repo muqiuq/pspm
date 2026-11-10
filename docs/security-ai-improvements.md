@@ -183,8 +183,8 @@ answer has one fixed type, checked by PSPM:
 
 | Model | Gets |
 |---|---|
-| Main, scan verdicts | per address, 24 h: requests, refused, not found, server errors, POSTs, bytes, active hours, unknown host names, backend 401/403, number of sites, exploit tags, nginx outcomes (public, denied, blocked, trap …), up to 20 paths with counts, 3 user agents |
-| Main, behaviour | per finding: the pattern and its evidence, requests, refused, not found, distinct not-found paths, backend 401/403, POSTs, bytes, active hours, busiest hour, machine-regular hours, networks, sites, refusals on other sites, authorised or not, up to 25 paths, 3 user agents |
+| Main, scan verdicts | per address, 24 h: requests, refused, not found, server errors, POSTs, bytes, active hours, unknown host names, backend 401/403, number of sites, exploit tags, nginx outcomes (public, denied, blocked, trap …), up to 12 paths with counts, 3 user agents |
+| Main, behaviour | per finding: the pattern and its evidence, requests, refused, not found, distinct not-found paths, backend 401/403, POSTs, bytes, active hours, busiest hour, machine-regular hours, networks, sites, refusals on other sites, authorised or not, up to 12 paths, 3 user agents |
 | Main, honeypot mining | refused paths of today and yesterday, one item per host and path (up to 300, most refused first): requests, refused, backend answers by status, distinct clients. Paths that already match a trap (rejected ones included) are left out. |
 | Verifier | the same evidence as the main model, without its verdict; for honeypots the proposals and the evidence of their paths only |
 | Injection check | the attacker-written strings only, one per item |
@@ -237,6 +237,12 @@ one field group per model:
 - **Each key** is stored encrypted, as today; empty keeps the saved key.
 - *Built:* each model has an **Answer within** time limit (10–900 s; main model and verifier
   180 s, the check 60 s). A model cut off at its limit is logged with what to change.
+  Requests are kept small, so they answer fast: *Items per request* (main model, default
+  10 addresses or findings; honeypot mining 6 × as many paths, at most 10 patterns back)
+  and at most about 12 KB of data each; the verifier gets the same batches. An analysis
+  round has an AI time budget (*AI decisions*, default 10 minutes): after it no new batch
+  starts, and the remaining addresses come back in the next round. The AI log labels each
+  call with its batch (2/7) and shows its size.
   Since AI calls can take minutes, the analysis runs as its own service (`pspm-analyse`,
   every minute, working every 5 minutes or on *Run now*); reading the log
   (`pspm-secscan`) stays every minute and is never held up by a model.

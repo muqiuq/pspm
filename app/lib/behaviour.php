@@ -186,31 +186,34 @@ final class Behaviour
             if ($c['auth'] && !$ai['analyse_authorised'] && $c['type'] !== 'ip') continue;
             $todo[] = $c;
         }
-        // the AI assesses them in batches of 20 (one call each, logged in the AI log)
+        // the AI assesses them in small batches ("Items per request", about 12 KB each), one call each, logged in the AI log
         $assessments = $shielded = $rowIds = [];
         $ps = AI::pseudonymiser();   // one for every batch, so the verifier sees the same pseudonyms
         $sys = '';
-        foreach (array_chunk($todo, 20, true) as $batch) {
-            if (!AI::available()) break;
-            $items = [];
-            foreach ($batch as $i => $c) {
-                $feat = $c['features'];
-                $items[] = ['finding' => "f-$i", 'actor' => $ps->of($c['type'] === 'ip' ? 'ip' : $c['type'], $c['actor']), 'kind' => $c['type'], 'authorised' => $c['auth'],
-                    'pattern' => $c['pattern'], 'deterministic_risk' => $c['risk'], 'evidence' => $c['evidence'],
-                    'requests_24h' => $feat['req'] ?? 0, 'denied' => $feat['denied'] ?? 0, 'not_found' => $feat['s404'] ?? 0,
-                    'backend_401_403' => $feat['ust401'] ?? 0, 'networks' => count($feat['ips'] ?? []), 'sites' => count($feat['sites'] ?? []),
-                    'posts' => $feat['posts'] ?? 0, 'bytes' => $feat['bytes'] ?? 0, 'active_hours' => count($feat['hours'] ?? []),
-                    'max_requests_per_hour' => $feat['max_hour_req'] ?? 0, 'machine_regular_hours' => $feat['regular'] ?? 0,
-                    'distinct_not_found' => count($feat['p404'] ?? []), 'denied_on_other_sites' => array_sum($feat['dsites'] ?? []),
-                    'paths' => array_map([AI::class, 'scrubPath'], array_slice(array_keys($feat['paths'] ?? []), 0, 25)),
-                    'user_agents' => array_slice(array_keys($feat['uas'] ?? []), 0, 3)];
-            }
+        $all = [];
+        foreach ($todo as $i => $c) {
+            $feat = $c['features'];
+            $all[$i] = ['finding' => "f-$i", 'actor' => $ps->of($c['type'] === 'ip' ? 'ip' : $c['type'], $c['actor']), 'kind' => $c['type'], 'authorised' => $c['auth'],
+                'pattern' => $c['pattern'], 'deterministic_risk' => $c['risk'], 'evidence' => $c['evidence'],
+                'requests_24h' => $feat['req'] ?? 0, 'denied' => $feat['denied'] ?? 0, 'not_found' => $feat['s404'] ?? 0,
+                'backend_401_403' => $feat['ust401'] ?? 0, 'networks' => count($feat['ips'] ?? []), 'sites' => count($feat['sites'] ?? []),
+                'posts' => $feat['posts'] ?? 0, 'bytes' => $feat['bytes'] ?? 0, 'active_hours' => count($feat['hours'] ?? []),
+                'max_requests_per_hour' => $feat['max_hour_req'] ?? 0, 'machine_regular_hours' => $feat['regular'] ?? 0,
+                'distinct_not_found' => count($feat['p404'] ?? []), 'denied_on_other_sites' => array_sum($feat['dsites'] ?? []),
+                'paths' => array_map([AI::class, 'scrubPath'], array_slice(array_keys($feat['paths'] ?? []), 0, 12)),
+                'user_agents' => array_slice(array_keys($feat['uas'] ?? []), 0, 3)];
+        }
+        $batches = AI::batches($all, (int)$ai['batch']);
+        foreach ($batches as $bi => $batchItems) {
+            if (!AI::available() || !AI::budgetLeft()) { $st['deferred'] = array_sum(array_map('count', array_slice($batches, $bi))); break; }   // their rule-based class stands
+            $batch = array_intersect_key($todo, $batchItems);
+            $items = array_values($batchItems);
             [$items] = AI::shield($items, ['paths' => 200, 'user_agents' => 120]);   // injection check
             $sys = 'You assess behaviour seen by a reverse proxy over 24 hours. For each finding classify it: "attack" (clearly malicious), "risky" '
                 . '(should be looked at by an admin), or "normal". Answer only JSON: {"assessments":[{"finding":"f-1","class":"attack|risky|normal","category":"'
                 . implode('|', array_keys(self::PATTERNS)) . '|other","risk":0-100,"confidence":0.0-1.0,"reason":"short","suggested_action":"short"}]}' . AI::UNTRUSTED_NOTE;
             try {
-                [$ans, $callId] = AI::call('main', 'behaviour', $sys, ['findings' => $items], $ps, 'assessments');
+                [$ans, $callId] = AI::call('main', 'behaviour', $sys, ['findings' => $items], $ps, 'assessments', ($bi + 1) . '/' . count($batches));
             } catch (Throwable $e) {
                 break;   // the AI log has the error; the deterministic classes stand
             }
@@ -238,22 +241,24 @@ final class Behaviour
                 if (Blocks::guard(explode('/', $c['actor'])[0], 'block', (float)($a['confidence'] ?? 0)) === null) $toVerify[$i] = $shielded[$i];
             }
         }
-        if ($toVerify) {
+        $vBatches = $toVerify ? AI::batches($toVerify, (int)$ai['batch']) : [];
+        foreach ($vBatches as $vi => $vb) {
             $verifyCall = null;
+            $failed = false;
             try {
                 if (!AI::available('verify')) throw new RuntimeException('verification model not available');
-                [$vans, $verifyCall] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['findings' => array_values($toVerify)], $ps, 'assessments');
+                [$vans, $verifyCall] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['findings' => array_values($vb)], $ps, 'assessments', ($vi + 1) . '/' . count($vBatches));
                 foreach ((array)($vans['assessments'] ?? []) as $x) {
-                    if (!is_array($x) || !preg_match('/^f-(\d+)$/', (string)($x['finding'] ?? ''), $m) || !isset($toVerify[(int)$m[1]]) || isset($verified[(int)$m[1]])) continue;
+                    if (!is_array($x) || !preg_match('/^f-(\d+)$/', (string)($x['finding'] ?? ''), $m) || !isset($vb[(int)$m[1]]) || isset($verified[(int)$m[1]])) continue;
                     $verified[(int)$m[1]] = ['class' => (string)($x['class'] ?? ''), 'confidence' => max(0.0, min(1.0, (float)($x['confidence'] ?? 0))), 'reason' => (string)($x['reason'] ?? '')];
                 }
             } catch (Throwable) {
-                $verifyFailed = true;   // the AI log has the error; no immediate block
+                $failed = $verifyFailed = true;   // the AI log has the error; no immediate block for this batch
             }
-            foreach ($toVerify as $i => $_) {
+            foreach ($vb as $i => $_) {
                 $vv = $verified[$i] ?? null;
                 DB::q('UPDATE ai_verdicts SET verify_verdict = ?, verify_confidence = ?, verify_reason = ?, verify_model = ?, verify_call_id = ? WHERE id = ?',
-                    [$vv['class'] ?? 'error', $vv['confidence'] ?? null, isset($vv['reason']) ? mb_substr($vv['reason'], 0, 500) : null, AI::model('verify')['model'], $verifyCall, $rowIds[$i]]);
+                    [$vv['class'] ?? ($failed ? 'error' : 'no answer'), $vv['confidence'] ?? null, isset($vv['reason']) ? mb_substr($vv['reason'], 0, 500) : null, AI::model('verify')['model'], $verifyCall, $rowIds[$i]]);
             }
         }
         foreach ($todo as $i => $c) {

@@ -278,5 +278,29 @@ Settings::set('scan', array_replace(Settings::get('scan', []), ['feedback_since'
 check(SecScan::feedback() === null && AI::settings()['mode'] === 'enforce', 'feedback: after an admin sets enforce again, only new blocks count');
 DB::q("DELETE FROM block_history WHERE reason = 'test' AND source = 'ai'");
 
+// ---- batches: small requests answer fast; the round's time budget
+$setModel('fake-main');
+$ai = AI::settings(); $ai['batch'] = 2; Settings::set('ai', $ai);
+$rows = [];
+foreach (range(1, 5) as $k) for ($i = 0; $i < 12; $i++) $rows[] = ['ip' => "198.51.205.$k", 'uri' => "/.env.k$k"];
+$lines($rows);
+$before = (int)DB::val('SELECT coalesce(max(id), 0) FROM ai_calls');
+SecScan::run(true);
+$scans = DB::all("SELECT request FROM ai_calls WHERE purpose = 'scan' AND id > ? ORDER BY id", [$before]);
+$sizes = array_map(fn($r) => count(json_dec($r['request'])['user']['subjects']), $scans);
+check(count($scans) >= 3 && max($sizes) <= 2 && json_dec($scans[0]['request'])['batch'] === '1/' . count($scans), 'scan: addresses in batches of "Items per request" (2), each call labelled 1/n');
+$mining = DB::all("SELECT request FROM ai_calls WHERE purpose = 'honeypots' AND id > ? ORDER BY id", [$before]);
+check($mining && max(array_map(fn($r) => count(json_dec($r['request'])['user']['paths']), $mining)) <= 12, 'honeypots: at most 6 × 2 = 12 paths per call');
+$ai['round_budget'] = 0; Settings::set('ai', $ai);
+$rows = [];
+for ($i = 0; $i < 12; $i++) $rows[] = ['ip' => '198.51.205.9', 'uri' => '/.git/HEAD'];
+$lines($rows);
+$before = (int)DB::val('SELECT coalesce(max(id), 0) FROM ai_calls');
+$r = SecScan::run(true);
+check(!DB::val("SELECT 1 FROM ai_calls WHERE purpose = 'scan' AND id > ?", [$before]) && ($r['full']['deferred'] ?? 0) >= 1, 'the round\'s AI time is used up: no new batch starts');
+$ai['round_budget'] = 600; $ai['batch'] = 10; Settings::set('ai', $ai);
+SecScan::run(true);
+check((bool)DB::val("SELECT 1 FROM ai_verdicts WHERE subject = '198.51.205.9/32'"), 'the deferred address is assessed in the next round');
+
 $ai = AI::settings(); $ai['model'] = ''; Settings::set('ai', $ai);
 echo "ai checks passed\n";

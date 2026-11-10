@@ -263,6 +263,7 @@ final class SecScan
     public static function analyse(bool $runNow): array
     {
         $stats = ['candidates' => 0, 'ai_calls' => 0, 'blocked' => 0];
+        AI::startRound();   // the AI calls of this round share its time budget
         $runBlocks = 0;
         // housekeeping
         DB::q('DELETE FROM trusted_ips WHERE expires_at IS NOT NULL AND expires_at < now()');
@@ -306,23 +307,30 @@ final class SecScan
         $lastCall = self::state('last_ai_call');
         $due = $runNow || !$lastCall || time() - strtotime($lastCall['at']) >= 60 * (int)$ai['min_interval_min'];
         if ($cands && $due && AI::available()) {
-            foreach (array_chunk($cands, 25, true) as $batch) {
-                if (!AI::available()) break;
-                $ps = AI::pseudonymiser();
-                $subjects = [];
-                foreach ($batch as $cidr => $s) {
-                    arsort($s['paths']);
-                    $outcomes = [];
-                    foreach ($s['out'] as $o => $n) { $o = preg_replace('/^(trap(-shadow)?):\d+$/', '$1', (string)$o) ?? (string)$o; $outcomes[$o] = ($outcomes[$o] ?? 0) + $n; }
-                    arsort($outcomes);
-                    $subjects[] = ['subject' => $ps->of('ip', $cidr), 'requests' => $s['req'], 'denied' => $s['denied'], 'not_found' => $s['s404'],
-                        'server_errors' => $s['s5xx'], 'posts' => $s['posts'], 'bytes_sent' => $s['bytes'], 'active_hours' => $s['active_hours'],
-                        'unknown_host_names' => $s['unknown'], 'backend_401_403' => $s['ust401'], 'sites' => count($s['sites']), 'exploit_tags' => $s['tags'],
-                        // how nginx answered (counts per outcome: public, denied, blocked, lan, cert, trap:…, unknown-…)
-                        'outcomes' => array_slice($outcomes, 0, 8, true),
-                        'paths' => array_map(fn($p, $n) => [AI::scrubPath((string)$p), $n], array_slice(array_keys($s['paths']), 0, 20), array_slice(array_values($s['paths']), 0, 20)),
-                        'user_agents' => array_slice(array_keys($s['uas']), 0, 3)];
+            // every candidate as the model sees it; one pseudonymiser, so pseudonyms stay unique across batches
+            $ps = AI::pseudonymiser();
+            $all = [];
+            foreach ($cands as $cidr => $s) {
+                arsort($s['paths']);
+                $outcomes = [];
+                foreach ($s['out'] as $o => $n) { $o = preg_replace('/^(trap(-shadow)?):\d+$/', '$1', (string)$o) ?? (string)$o; $outcomes[$o] = ($outcomes[$o] ?? 0) + $n; }
+                arsort($outcomes);
+                $all[$cidr] = ['subject' => $ps->of('ip', $cidr), 'requests' => $s['req'], 'denied' => $s['denied'], 'not_found' => $s['s404'],
+                    'server_errors' => $s['s5xx'], 'posts' => $s['posts'], 'bytes_sent' => $s['bytes'], 'active_hours' => $s['active_hours'],
+                    'unknown_host_names' => $s['unknown'], 'backend_401_403' => $s['ust401'], 'sites' => count($s['sites']), 'exploit_tags' => $s['tags'],
+                    // how nginx answered (counts per outcome: public, denied, blocked, lan, cert, trap:…, unknown-…)
+                    'outcomes' => array_slice($outcomes, 0, 8, true),
+                    'paths' => array_map(fn($p, $n) => [AI::scrubPath((string)$p), $n], array_slice(array_keys($s['paths']), 0, 12), array_slice(array_values($s['paths']), 0, 12)),
+                    'user_agents' => array_slice(array_keys($s['uas']), 0, 3)];
+            }
+            // small requests answer fast: "Items per request" (Settings → Models) and about 12 KB each
+            $batches = AI::batches($all, (int)$ai['batch']);
+            foreach ($batches as $bi => $batch) {
+                if (!AI::available() || !AI::budgetLeft()) {   // the rest comes back in the next round
+                    $stats['deferred'] = array_sum(array_map('count', array_slice($batches, $bi)));
+                    break;
                 }
+                $subjects = array_values($batch);
                 // attacker-written text through the injection check (docs/security-ai-improvements.md §2)
                 [$subjects, $flagged] = AI::shield($subjects, ['paths' => 200, 'user_agents' => 120]);
                 foreach ($subjects as &$sj) if (!empty($sj['injection_attempted'])) $sj['exploit_tags']['injection'] = 1;
@@ -332,7 +340,7 @@ final class SecScan
                     . 'for normal users, crawlers or monitoring. Answer only JSON: {"verdicts":[{"subject":"ip-1","verdict":"block|watch|benign",'
                     . '"confidence":0.0-1.0,"reason":"one short sentence"}]}' . AI::UNTRUSTED_NOTE;
                 try {
-                    [$ans, $callId] = AI::call('main', 'scan', $sys, ['subjects' => $subjects], $ps, 'verdicts');   // logged in the AI log
+                    [$ans, $callId] = AI::call('main', 'scan', $sys, ['subjects' => $subjects], $ps, 'verdicts', ($bi + 1) . '/' . count($batches));   // logged in the AI log
                     $stats['ai_calls']++;
                 } catch (Throwable $e) {
                     break;   // the AI log has the error; the next round tries again
@@ -352,7 +360,7 @@ final class SecScan
                 // the verifier: an independent second opinion on every block (same evidence, not the first verdict)
                 $toVerify = array_filter($entries, fn($e) => $e['why'] === null);
                 [$second, $verifyCall, $verifyFailed] = AI::configured('verify') && $toVerify
-                    ? self::verify(array_values(array_map(fn($e) => $e['ev'], $toVerify)), $sys, $ps) : [[], null, false];
+                    ? self::verify(array_values(array_map(fn($e) => $e['ev'], $toVerify)), $sys, $ps, ($bi + 1) . '/' . count($batches)) : [[], null, false];
                 foreach ($entries as $cidr => $e) {
                     $vv = $second[$cidr] ?? null;
                     $outcome = $e['why'];
@@ -421,11 +429,11 @@ final class SecScan
      * The verifier's verdicts on block candidates (docs/security-ai-improvements.md §3).
      * @return array{0: array<string, array{verdict: string, confidence: float, reason: string}>, 1: ?int, 2: bool} by subject, call id, failed
      */
-    private static function verify(array $subjects, string $sys, object $ps): array
+    private static function verify(array $subjects, string $sys, object $ps, ?string $batch = null): array
     {
         if (!AI::available('verify')) return [[], null, true];
         try {
-            [$ans, $id] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['subjects' => $subjects], $ps, 'verdicts');
+            [$ans, $id] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['subjects' => $subjects], $ps, 'verdicts', $batch);
         } catch (Throwable) {
             return [[], null, true];   // the AI log has the error
         }

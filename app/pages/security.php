@@ -310,7 +310,8 @@ if ($tab === 'overview'):
         $res = json_dec($c['result'] ?? 'null'); $ps = json_dec($c['pseudonyms']) ?: []; $vs = $byCall[$c['id']] ?? []; ?>
       <tr>
         <td class="text-nowrap"><?= h(fmt_time($c['at'], 'Y-m-d H:i:s')) ?></td>
-        <td><?= h(AI::PURPOSES[$c['purpose']] ?? $c['purpose']) ?><div class="text-muted"><?= h(AI::ROLES[$c['role']] ?? $c['role']) ?></div></td>
+        <?php $req = json_dec($c['request']) ?: []; $bl = is_array($req) ? ($req['batch'] ?? null) : null; if (is_array($req)) unset($req['batch']); ?>
+        <td><?= h(AI::PURPOSES[$c['purpose']] ?? $c['purpose']) ?><?= $bl ? ' <span class="text-muted">batch ' . h($bl) . '</span>' : '' ?><div class="text-muted"><?= h(AI::ROLES[$c['role']] ?? $c['role']) ?></div></td>
         <td><?= h($c['model']) ?><?= $c['model_answer'] && $c['model_answer'] !== $c['model'] ? '<div class="text-muted">answered: ' . h($c['model_answer']) . '</div>' : '' ?></td>
         <td>
           <?php if ($c['error']): ?><?= badge('red', 'error') ?> <span class="text-break"><?= h(mb_substr($c['error'], 0, 240)) ?></span>
@@ -327,7 +328,7 @@ if ($tab === 'overview'):
           <?php else: ?><?= badge('green', 'answered') ?><?php endif; ?>
           <?= !empty($res['_dropped']) ? '<div>' . badge('amber', $res['_dropped'] . ' dropped') . ' not of the expected type</div>' : '' ?>
           <details class="mt-1"><summary class="text-muted">show request and answer</summary>
-            <div class="mt-1"><strong>Sent</strong> (HTTP <?= h($c['status']) ?>)<pre class="small mb-1"><?= $pretty(json_dec($c['request'])) ?></pre>
+            <div class="mt-1"><strong>Sent</strong> (HTTP <?= h($c['status']) ?>, <?= h(number_format(strlen(json_enc($req)))) ?> bytes)<pre class="small mb-1"><?= $pretty($req) ?></pre>
             <strong>Answer</strong><pre class="small mb-1"><?= h((string)$c['response']) ?></pre>
             <?php if ($ps): ?><strong>Pseudonyms</strong> (this box only)<pre class="small mb-0"><?php foreach ($ps as $k => $real) echo h("$k = $real") . "\n"; ?></pre><?php endif; ?></div>
           </details></td>

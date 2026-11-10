@@ -270,53 +270,63 @@ final class Traps
         if (!$items) return 0;
         $sys = 'You design honeypot rules for a reverse proxy. From refused request paths, propose patterns that only attackers request '
             . '(e.g. /.env, /.git/config, /wp-login.php on sites without WordPress). Never propose paths a real application may serve, '
-            . 'or anything a backend answered with something other than 404/410. Answer only JSON: {"patterns":[{"host":"host-1 or *",'
+            . 'or anything a backend answered with something other than 404/410. Propose at most 10 patterns. Answer only JSON: {"patterns":[{"host":"host-1 or *",'
             . '"kind":"exact|prefix","path":"/...","reason":"short"}]}' . AI::UNTRUSTED_NOTE;
-        try { [$ans, $callId] = AI::call('main', 'honeypots', $sys, ['paths' => $items], $ps, 'patterns'); }   // logged in the AI log
-        catch (Throwable $e) { return 0; }
+        $vsys = 'You review honeypot rules proposed for a reverse proxy: request paths that only attackers ask for. For each proposal decide "confirm" or '
+            . '"reject"; reject anything a real application, user, crawler or monitoring system might request. Answer only JSON: '
+            . '{"decisions":[{"p":"p-1","decision":"confirm|reject","reason":"short"}]}' . AI::UNTRUSTED_NOTE . AI::VERIFY_NOTE;
         $window = gmdate('Y-m-d\TH:00:00\Z', intdiv(time(), 10800) * 10800);
         $n = 0;
-        $props = [];
-        foreach (array_slice((array)($ans['patterns'] ?? []), 0, 50) as $p) {
-            if (!is_array($p)) continue;
-            $host = ($p['host'] ?? '*') === '*' ? '*' : $ps->reverse((string)($p['host'] ?? ''));
-            $kind = in_array($p['kind'] ?? '', ['exact', 'prefix'], true) ? $p['kind'] : 'exact';
-            if (!$host || !self::validPath($kind, (string)($p['path'] ?? ''))) continue;
-            $props['p-' . (count($props) + 1)] = ['host' => $host, 'kind' => $kind, 'path' => (string)$p['path'], 'reason' => (string)($p['reason'] ?? '')];
-        }
-        // the verifier: a proposal counts as a vote only when it agrees (docs/security-ai-improvements.md §3)
-        $rejected = 0;
-        $verifyCall = null;
-        $verifyFailed = false;
-        if ($props && AI::configured('verify')) {
-            $vsys = 'You review honeypot rules proposed for a reverse proxy: request paths that only attackers ask for. For each proposal decide "confirm" or '
-                . '"reject"; reject anything a real application, user, crawler or monitoring system might request. Answer only JSON: '
-                . '{"decisions":[{"p":"p-1","decision":"confirm|reject","reason":"short"}]}' . AI::UNTRUSTED_NOTE . AI::VERIFY_NOTE;
-            $ok = [];
-            try {
-                if (!AI::available('verify')) throw new RuntimeException('verification model not available');
-                [$vans, $verifyCall] = AI::call('verify', 'verify', $vsys, ['proposals' => array_map(fn($k, $x) => ['p' => $k, 'host' => $x['host'] === '*' ? '*' : $ps->of('host', $x['host']),
-                    'kind' => $x['kind'], 'path' => $x['path'], 'reason' => AI::untrusted($x['reason'], 200)], array_keys($props), $props),
-                    'evidence' => self::evidenceFor($props, $items)], $ps, 'decisions');
-                foreach ((array)($vans['decisions'] ?? []) as $d) if (is_array($d) && ($d['decision'] ?? '') === 'confirm' && isset($props[$d['p'] ?? ''])) $ok[$d['p']] = true;
-            } catch (Throwable) {
-                $verifyFailed = true;   // no answer from the verifier: no votes in this window (the AI log has the error)
+        // small requests: 6 × "Items per request" paths each (60 by default), about 12 KB, at most 10 patterns back
+        $batches = AI::batches($items, 6 * (int)AI::settings()['batch']);
+        foreach ($batches as $bi => $batch) {
+            if (!AI::available() || !AI::budgetLeft()) break;   // the rest waits for the next mining
+            $label = ($bi + 1) . '/' . count($batches);
+            $batch = array_values($batch);
+            try { [$ans, $callId] = AI::call('main', 'honeypots', $sys, ['paths' => $batch], $ps, 'patterns', $label); }   // logged in the AI log
+            catch (Throwable $e) { break; }
+            $props = [];
+            foreach (array_slice((array)($ans['patterns'] ?? []), 0, 10) as $p) {
+                if (!is_array($p)) continue;
+                $host = ($p['host'] ?? '*') === '*' ? '*' : $ps->reverse((string)($p['host'] ?? ''));
+                $kind = in_array($p['kind'] ?? '', ['exact', 'prefix'], true) ? $p['kind'] : 'exact';
+                if (!$host || !self::validPath($kind, (string)($p['path'] ?? ''))) continue;
+                $props['p-' . (count($props) + 1)] = ['host' => $host, 'kind' => $kind, 'path' => (string)$p['path'], 'reason' => (string)($p['reason'] ?? '')];
             }
-            $rejected = count($props) - count($ok);
-            $props = array_intersect_key($props, $ok);
-        }
-        foreach ($props as $p) {
-            $id = self::add($p['host'], $p['kind'], $p['path'], 'proposed', 'ai', mb_substr($p['reason'], 0, 200));
-            if (!$id) continue;
-            if (DB::q('INSERT INTO trap_votes (trap_id, window_start) VALUES (?, ?) ON CONFLICT DO NOTHING', [$id, $window])->rowCount()) {
-                DB::q('UPDATE traps SET votes = votes + 1 WHERE id = ?', [$id]);
-                $n++;
+            // the verifier: a proposal counts as a vote only when it agrees (docs/security-ai-improvements.md §3)
+            $rejected = 0;
+            $verifyCall = null;
+            $verifyFailed = false;
+            $proposed = count($props);
+            if ($props && AI::configured('verify')) {
+                $ok = [];
+                try {
+                    if (!AI::available('verify')) throw new RuntimeException('verification model not available');
+                    [$vans, $verifyCall] = AI::call('verify', 'verify', $vsys, ['proposals' => array_map(fn($k, $x) => ['p' => $k, 'host' => $x['host'] === '*' ? '*' : $ps->of('host', $x['host']),
+                        'kind' => $x['kind'], 'path' => $x['path'], 'reason' => AI::untrusted($x['reason'], 200)], array_keys($props), $props),
+                        'evidence' => self::evidenceFor($props, $batch)], $ps, 'decisions', $label);
+                    foreach ((array)($vans['decisions'] ?? []) as $d) if (is_array($d) && ($d['decision'] ?? '') === 'confirm' && isset($props[$d['p'] ?? ''])) $ok[$d['p']] = true;
+                } catch (Throwable) {
+                    $verifyFailed = true;   // no answer from the verifier: no votes from this batch (the AI log has the error)
+                }
+                $rejected = count($props) - count($ok);
+                $props = array_intersect_key($props, $ok);
             }
+            $votes = 0;
+            foreach ($props as $p) {
+                $id = self::add($p['host'], $p['kind'], $p['path'], 'proposed', 'ai', mb_substr($p['reason'], 0, 200));
+                if (!$id) continue;
+                if (DB::q('INSERT INTO trap_votes (trap_id, window_start) VALUES (?, ?) ON CONFLICT DO NOTHING', [$id, $window])->rowCount()) {
+                    DB::q('UPDATE traps SET votes = votes + 1 WHERE id = ?', [$id]);
+                    $votes++;
+                }
+            }
+            $n += $votes;
+            DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, answer, model, outcome, call_id, verify_model, verify_call_id) VALUES ('mining', 'traps', 'patterns', ?::jsonb, ?, ?, ?, ?, ?)",
+                [json_enc($ans), AI::settings()['model'], "batch $label: $votes votes" . ($verifyFailed ? ', the verifier did not answer (' . $proposed . ' proposals wait for the next mining)'
+                    : ($rejected ? ", $rejected rejected by the verifier" : '')), $callId,
+                 $verifyCall ? AI::model('verify')['model'] : null, $verifyCall]);
         }
-        DB::q("INSERT INTO ai_verdicts (kind, subject, verdict, answer, model, outcome, call_id, verify_model, verify_call_id) VALUES ('mining', 'traps', 'patterns', ?::jsonb, ?, ?, ?, ?, ?)",
-            [json_enc($ans), AI::settings()['model'], "$n votes" . ($verifyFailed ? ', the verifier did not answer (' . count($ans['patterns'] ?? []) . ' proposals wait for the next mining)'
-                : ($rejected ? ", $rejected rejected by the verifier" : '')), $callId,
-             $verifyCall ? AI::model('verify')['model'] : null, $verifyCall]);
         return $n;
     }
 }

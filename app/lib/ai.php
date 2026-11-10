@@ -12,7 +12,10 @@ declare(strict_types=1);
 final class AI
 {
     public const DEFAULTS = ['base_url' => 'https://openrouter.ai/api/v1', 'model' => '', 'key_enc' => '', 'mode' => 'enforce',
-        'daily_cap' => 200, 'min_interval_min' => 15, 'confidence' => 0.85, 'analyse_authorised' => true, 'reaction_hours' => 24, 'timeout' => 180];
+        'daily_cap' => 200, 'min_interval_min' => 15, 'confidence' => 0.85, 'analyse_authorised' => true, 'reaction_hours' => 24, 'timeout' => 180,
+        'batch' => 10, 'round_budget' => 600];
+    /** A request's data at most about this size (≈ 3000 tokens): small requests answer fast. */
+    public const BATCH_BYTES = 12000;
     public const ROLES = ['main' => 'Main model', 'check' => 'Injection check', 'verify' => 'Verification model'];
     public const PURPOSES = ['scan' => 'Scan verdicts', 'behaviour' => 'Behaviour', 'honeypots' => 'Honeypots', 'check' => 'Injection check',
         'verify' => 'Verification', 'test' => 'Test'];
@@ -52,6 +55,36 @@ final class AI
     /** Noted in prompts sent while the check is unavailable; the AI log counts them. */
     public const CHECK_UNAVAILABLE = 'injection check unavailable: only path-shaped paths and user-agent product names';
     public const REMOVED = '[removed: injection attempt]';
+
+    private static ?float $roundStart = null;
+
+    /** An analysis round starts: its AI calls share a time budget (Settings → AI decisions). */
+    public static function startRound(): void { self::$roundStart = microtime(true); }
+
+    /** May another batch start in this round? (A started decision still gets its verification.) */
+    public static function budgetLeft(): bool
+    {
+        return self::$roundStart === null || microtime(true) - self::$roundStart < (int)self::settings()['round_budget'];
+    }
+
+    /**
+     * Split items into requests of at most $max items and about $bytes of JSON each, so every
+     * request stays small and fast. Keys are kept; an item larger than $bytes travels alone.
+     * @return list<array>
+     */
+    public static function batches(array $items, int $max, int $bytes = self::BATCH_BYTES): array
+    {
+        $out = $cur = [];
+        $size = 0;
+        foreach ($items as $k => $it) {
+            $n = strlen(json_enc($it));
+            if ($cur && (count($cur) >= max(1, $max) || $size + $n > $bytes)) { $out[] = $cur; $cur = []; $size = 0; }
+            $cur[$k] = $it;
+            $size += $n;
+        }
+        if ($cur) $out[] = $cur;
+        return $out;
+    }
 
     /** The decision settings and the main model (Settings → Runtime → AI). */
     public static function settings(): array
@@ -192,10 +225,10 @@ final class AI
      * @return array{0: array, 1: int} the decoded object and the id of the logged call
      * @throws RuntimeException on transport or format errors (after logging them)
      */
-    public static function call(string $role, string $purpose, string $system, array $payload, ?object $ps = null, ?string $schema = null): array
+    public static function call(string $role, string $purpose, string $system, array $payload, ?object $ps = null, ?string $schema = null, ?string $batch = null): array
     {
         $m = self::model($role);
-        $request = ['system' => $system, 'user' => $payload];
+        $request = ['system' => $system, 'user' => $payload] + ($batch !== null ? ['batch' => $batch] : []);   // "batch" is for the log only
         $log = ['role' => $role, 'purpose' => $purpose, 'model' => $m['model'], 'request' => $request,
             'pseudonyms' => $ps && method_exists($ps, 'map') ? $ps->map() : []];
         $t0 = microtime(true);
