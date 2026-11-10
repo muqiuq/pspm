@@ -1,7 +1,8 @@
 # AI security: analysis and planned improvements
 
-Status: **planned, not built** (2026-11-10, revised the same day). Complements the plan,
-§15 (security monitoring). Each step below becomes its own commit with tests.
+Status: **built** (2026-11-10), steps 1–5 below, each its own commit with tests (fake
+OpenAI-compatible API in the smoke test). Complements the plan, §15 (security monitoring).
+Where the build differs from the first plan, the section says so (*Built:*).
 
 ## Summary
 
@@ -153,6 +154,17 @@ answer has one fixed type, checked by PSPM:
     MB of memory, which is tight on a 2 GB box
   - **behind an API:** configured in its own Settings fields; the strings leave the box,
     already scrubbed
+- *Built:* two types in Settings. *Classifier API*: a URL that takes `{"inputs": [...]}`
+  and answers per input a list of `{label, score}` (Hugging Face text classification, e.g.
+  Llama Prompt Guard 2 hosted or on `127.0.0.1`; labels containing *injection*,
+  *jailbreak*, *malicious*, *unsafe* or `LABEL_1` count). *Chat model*: an
+  OpenAI-compatible model asked for `{"items": [{"i", "label", "score"}]}`; a missing item
+  counts as injection. Plain HTTP is accepted only for `127.0.0.1` or `localhost`.
+- *Built, fail closed:* without a working check, user agents are left out, but paths that
+  are path-shaped (letters, digits, `. _ ~ / -`, no spaces or %-encoding, at most 100
+  characters) are still sent: they cannot carry a sentence, and without them honeypot
+  mining could not work. A flagged address is already a candidate; it gets the tag
+  `injection`.
 
 The model prompts also get these changes:
 - Untrusted text goes into a separate, clearly marked field, with control characters
@@ -175,7 +187,11 @@ The model prompts also get these changes:
 - **Cost:** the verifier sees only block candidates and trap proposals, usually a handful
   a day.
 - *Alternative:* a reviewer that sees the first verdict and must refute it. Its prompts
-  are cheaper, but it is influenced by the first answer. *Open:* which mode.
+  are cheaper, but it is influenced by the first answer.
+- *Built:* the independent mode. A disagreement, or no answer from the verifier, becomes a
+  finding *AI models disagree on a block* (Security → Behaviour) with both verdicts, an
+  e-mail, and the reaction deadline. The verifier's instructions add that a block shuts
+  out real users.
 
 ## 4. Models in Settings: one field group each
 
@@ -194,7 +210,8 @@ one field group per model:
   model that answered, and the duration.
 - **Each key** is stored encrypted, as today; empty keeps the saved key.
 - **The confidence threshold, reaction time and *analyse authorised actors*** stay in the
-  AI card. They apply to the decisions, not to one model.
+  AI card. They apply to the decisions, not to one model. *Built:* the card is called
+  *AI decisions*.
 - **The AI log and its figures** are kept per model.
 
 ## 5. AI log
@@ -221,16 +238,21 @@ one field group per model:
   - AI blocks that admins removed
 
 **Retention:** full requests and answers for 30 days; verdicts for 180 days, as now.
+Injection check results are cached for 24 hours. The AI log is not part of exports.
 
 ## 6. Further hardening and fixes
 
 - **Strict answers:** a JSON schema (`response_format: json_schema`) where the provider
-  supports it; anything else is rejected and logged.
+  supports it; anything else is rejected and logged. *Built:* items of another type are
+  dropped and counted, an answer of another shape is rejected; a model that refuses JSON
+  schemas (HTTP 400) is asked for a JSON object instead, and this is remembered.
 - **Backoff:** after rate-limit or server errors (HTTP 429 or 5xx) a model pauses (shown in
-  the log) instead of being retried every 15 minutes.
+  the log) instead of being retried every 15 minutes. *Built:* 15 minutes, doubling up to
+  4 hours while errors repeat; a good answer ends the pause.
 - **Scrubbing:** e-mail addresses and name-like path segments are removed before sending.
 - **Feedback:** if admins remove more than a set share of AI blocks within 7 days, the AI
-  switches itself to dry-run and notifies by e-mail.
+  switches itself to dry-run and notifies by e-mail. *Built:* more than 20 % of at least
+  5 AI blocks; setting the mode back to *enforce* starts a new window.
 - **Bug fixes:**
   - each model's cap counts its calls
   - behaviour call errors are logged
@@ -276,6 +298,5 @@ Reconsider it if the honeypots catch too little, for example on new boxes.
 
 ## Open questions
 
-1. "jev": which model or product is meant, and should the check run on the box or
-   behind an API?
-2. Verifier: independent second opinion (recommended) or reviewer?
+1. "jev": which model or product is meant? Any classifier with a Hugging Face-style
+   endpoint, or any OpenAI-compatible chat model, fits the built check.
