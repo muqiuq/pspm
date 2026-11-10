@@ -226,7 +226,7 @@ one field group per model:
 
 - **URL and key** of the check and the verifier can be left on *same as the main model*,
   so one OpenRouter key is enough.
-- **Each group** has a *Test* button: one fixed harmless request, showing the answer, the
+- **Each group** has a *Save and test* button: it saves the page, then sends one fixed harmless request, showing the answer, the
   model that answered, and the duration.
 - **Each key** is stored encrypted, as today; empty keeps the saved key.
 - **The confidence threshold, reaction time and *analyse authorised actors*** stay in the

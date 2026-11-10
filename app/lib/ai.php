@@ -243,15 +243,29 @@ final class AI
         $log['status'] = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         $err = curl_error($ch);
         curl_close($ch);
+        $tail = $key !== '' ? substr($key, -4) : '';
         if ($key !== '') sodium_memzero($key);
+        $key = $tail;   // only the last four characters remain, for the note on a refused key
         // rate limits and server errors pause the model (15 min, doubling up to 4 h); a good answer ends a pause
         if ($log['status'] === 429 || $log['status'] >= 500) self::pauseAfter($m['role'], $log['status']);
         elseif ($log['status'] === 200 && SecScan::state("ai_pause:{$m['role']}")) DB::q('DELETE FROM scan_state WHERE key = ?', ["ai_pause:{$m['role']}"]);
         $log['response'] = $res === false ? null : substr((string)$res, 0, 100000);
-        if ($res === false || $log['status'] !== 200) throw new RuntimeException("AI API: HTTP {$log['status']} " . ($err ?: substr((string)$res, 0, 300)));
+        if ($res === false || $log['status'] !== 200) {
+            $why = in_array($log['status'], [401, 403], true) ? ' — ' . self::authNote($m, $key ?? '') : '';
+            throw new RuntimeException("AI API: HTTP {$log['status']} " . ($err ?: substr((string)$res, 0, 300)) . $why);
+        }
         $d = json_decode((string)$res, true);
         if (!is_array($d)) throw new RuntimeException('AI API: the answer is not JSON');
         return $d;
+    }
+
+    /** What PSPM sent when an API refused the key (HTTP 401/403): the key's last four characters, or why there was none. */
+    private static function authNote(array $m, string $tail): string
+    {
+        $who = self::ROLES[$m['role']] ?? $m['role'];
+        if ($tail !== '') return "PSPM sent the saved key …$tail of the $who as \"Authorization: Bearer\"; check that the key is valid for this API URL.";
+        if (!empty($m['same_as_main'])) return "PSPM sent no key: the $who uses the main model's URL and key (\"same as the main model\"), and the main model has no key saved.";
+        return "PSPM sent no key: none is saved for the $who (a key typed in Settings counts once the page is saved).";
     }
 
     // ---------------------------------------------------------------- injection check

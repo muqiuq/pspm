@@ -7,19 +7,7 @@ $g = Settings::global();
 $login = Settings::get('login');
 $errors = [];
 $rt = [];
-if (is_post() && in_array(post('action'), ['runtime', 'test_mail', 'test_model'], true)) {
-    if (post('action') === 'test_model') {
-        // a fixed, harmless request with the saved settings of one model; the AI log keeps it
-        $role = array_key_exists((string)post('role'), AI::ROLES) ? (string)post('role') : 'main';
-        try {
-            $t = AI::test($role);
-            flash(AI::ROLES[$role] . ': ' . ($t['ok'] ? 'answered correctly' : 'answered, but not as asked') . " in {$t['ms']} ms (model "
-                . ($t['model'] ?? '?') . '). The call is in Security → AI log.', $t['ok'] ? 'success' : 'warning');
-        } catch (Throwable $e) {
-            flash(AI::ROLES[$role] . ': ' . mb_substr($e->getMessage(), 0, 300), 'danger');
-        }
-        redirect('/settings#models');
-    }
+if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
     if (post('action') === 'test_mail') {
         $to = Validate::email((string)post('test_to'));
         $ok = $to && Notify::mail([$to], '[PSPM] Test e-mail', "This is a test from PSPM.\n", $err);
@@ -91,9 +79,21 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail', 'test_model']
     }
     Audit::log('settings.runtime', 'settings:runtime', ['ai_model' => $ai['model'], 'smtp_host' => $smtp['host']]);
     State::publish('meta', 'certs', 'traps');
+    if (!$errors && array_key_exists((string)post('test_role'), AI::ROLES)) {
+        // "Save and test": the settings above are saved; now one fixed, harmless request (the AI log keeps it)
+        $role = (string)post('test_role');
+        try {
+            $t = AI::test($role);
+            flash('Saved. ' . AI::ROLES[$role] . ': ' . ($t['ok'] ? 'answered correctly' : 'answered, but not as asked') . " in {$t['ms']} ms (model "
+                . ($t['model'] ?? '?') . '). The call is in Security → AI log.', $t['ok'] ? 'success' : 'warning');
+        } catch (Throwable $e) {
+            flash('Saved. ' . AI::ROLES[$role] . ': ' . mb_substr($e->getMessage(), 0, 400), 'danger');
+        }
+        redirect('/settings#models');
+    }
     if (!$errors) { flash('Saved. These settings take effect at once.'); redirect('/settings#runtime'); }
 }
-if (is_post() && !in_array(post('action'), ['runtime', 'test_mail', 'test_model'], true)) {
+if (is_post() && !in_array(post('action'), ['runtime', 'test_mail'], true)) {
     $in = [
         'admin_host' => post('admin_host'), 'admin_access' => (array)post('admin_access', []),
         'acme_email' => post('acme_email'),
@@ -131,8 +131,8 @@ $modelGroup = function (string $role, string $p, string $what, array $m, array $
     $o .= $m['key_enc'] ? f_check("{$p}_key_clear", 'Remove the key', false) : '';
     $o .= '</div>' . implode('', $extra['after'] ?? []);
     $o .= '<div class="row align-items-end"><div class="col-6">' . f_text("{$p}_daily_cap", 'Calls per day at most', $m['daily_cap'], [], '', 'number') . '</div>'
-        . '<div class="col-6 mb-3"><button class="btn btn-sm btn-outline-secondary" form="test-model-form" name="role" value="' . h($role) . '">Test</button>'
-        . ' <span class="small text-muted">uses the saved settings</span></div></div>';
+        . '<div class="col-6 mb-3"><button class="btn btn-sm btn-outline-secondary" name="test_role" value="' . h($role) . '">Save and test</button>'
+        . ' <span class="small text-muted">saves this page first</span></div></div>';
     return $o . '</fieldset>';
 };
 $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts', []);
@@ -193,7 +193,6 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 <h2 class="h5">Runtime <span class="badge text-bg-success align-middle">takes effect at once</span></h2>
 <?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1, 'verify_base_url' => 1])) ?>
 <form method="post" id="test-mail-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_mail"></form>
-<form method="post" id="test-model-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_model"></form>
 <form method="post" autocomplete="off"><?= csrf_field() ?><input type="hidden" name="action" value="runtime">
 <div class="row g-3">
   <div class="col-lg-6">

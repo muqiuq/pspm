@@ -28,6 +28,13 @@ if (str_ends_with($path, '/classify')) {
         : [['label' => 'BENIGN', 'score' => 0.97], ['label' => 'INJECTION', 'score' => 0.03]], (array)($in['inputs'] ?? [])));
 }
 if (str_ends_with($path, '/classify-broken')) out(200, ['result' => 'everything is fine']);
+// a classifier that needs its key (Bearer guard-key), like a hosted endpoint
+if (str_ends_with($path, '/classify-auth')) {
+    $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    if ($auth === '') out(401, ['error' => 'Missing authentication header']);
+    if ($auth !== 'Bearer guard-key') out(401, ['error' => 'invalid token']);
+    out(200, array_map(fn($t) => stripos((string)$t, 'ignore') !== false ? [['label' => 'INJECTION', 'score' => 0.98]] : [['label' => 'INJECTION', 'score' => 0.02]], (array)($in['inputs'] ?? [])));
+}
 if (!str_ends_with($path, '/chat/completions')) out(404, ['error' => 'unknown path']);
 $model = (string)($in['model'] ?? '');
 if ($model === 'fake-noschema' && ($in['response_format']['type'] ?? '') === 'json_schema') out(400, ['error' => ['message' => 'response_format json_schema is not supported for this model']]);

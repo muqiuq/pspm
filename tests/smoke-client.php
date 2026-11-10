@@ -101,21 +101,25 @@ $runtime = ['action' => 'runtime', 'max_failures' => '7', 'window_mins' => '15',
 check($c === 303 && str_contains($b, 'name="max_failures" value="7"') && str_contains($b, 'name="ban_hours" value="2"'), 'settings: sign-in protection is saved with the runtime settings');
 check(str_contains($b, 'name="behaviour_hours" value="12"'), 'settings: behaviour search every 12 hours by default');
 // Models: the main model's field group, its Test button, and the call in the AI log
-check(str_contains($b, 'id="models"') && str_contains($b, '>Main model</legend>') && str_contains($b, 'form="test-model-form" name="role" value="main"'), 'settings: Models card with the main model and a Test button');
-check(str_contains($b, '>Injection check</legend>') && str_contains($b, 'name="check_type"') && str_contains($b, 'name="check_threshold"') && str_contains($b, 'value="check">Test'),
-    'settings: the injection check has its own fields and Test button');
-check(str_contains($b, '>Verification model</legend>') && str_contains($b, 'name="verify_same"') && str_contains($b, 'value="verify">Test'), 'settings: the verifier has its own fields and Test button');
+check(str_contains($b, 'id="models"') && str_contains($b, '>Main model</legend>') && str_contains($b, 'name="test_role" value="main">Save and test'), 'settings: Models card with the main model and Save and test');
+check(str_contains($b, '>Injection check</legend>') && str_contains($b, 'name="check_type"') && str_contains($b, 'name="check_threshold"') && str_contains($b, 'value="check">Save and test'),
+    'settings: the injection check has its own fields and Save and test');
+check(str_contains($b, '>Verification model</legend>') && str_contains($b, 'name="verify_same"') && str_contains($b, 'value="verify">Save and test'), 'settings: the verifier has its own fields and Save and test');
 [$c, $b] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_base_url' => 'http://ai.example.test/v1', 'ai_model' => 'fake-main']);
 check($c === 200 && str_contains($b, 'HTTPS only (plain HTTP only for 127.0.0.1 or localhost)'), 'settings: plain HTTP refused for a remote API');
-[$c] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_base_url' => 'http://127.0.0.1:8099/v1', 'ai_model' => 'fake-main', 'ai_key' => 'fake-key']);
+// a key typed and "Save and test" pressed at once (the test used to run before the key was saved)
+[$c, , $loc] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_base_url' => 'http://127.0.0.1:8099/v1', 'ai_model' => 'fake-main', 'ai_key' => 'fake-key',
+    'test_role' => 'main']);
 [, $b] = req('GET', '/settings');
-[$c, , $loc] = req('POST', '/settings', ['_csrf' => csrf($b), 'action' => 'test_model', 'role' => 'main']);
+check($c === 303 && str_contains($b, 'Saved. Main model: answered correctly in') && str_contains($b, 'fake-main-2026'), 'settings: Save and test saves the typed key, then tests');
+[$c] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_base_url' => 'http://127.0.0.1:8099/v1', 'ai_model' => 'fake-main',
+    'check_type' => 'classifier', 'check_model' => 'fake-guard-auth', 'check_base_url' => 'http://127.0.0.1:8099/classify-auth', 'check_key' => 'guard-key', 'test_role' => 'check']);
 [, $b] = req('GET', '/settings');
-check($c === 303 && str_contains($b, 'Main model: answered correctly in') && str_contains($b, 'fake-main-2026'), 'settings: Test shows the answer, the answering model and the time');
+check($c === 303 && str_contains($b, 'Saved. Injection check: answered correctly'), 'settings: the injection check with a key typed just now: Save and test works');
 [$c, $b] = req('GET', '/security?tab=ailog');
 check($c === 200 && str_contains($b, '>Test<') && str_contains($b, 'fake-main') && str_contains($b, 'connection test'), 'AI log: the test call with its request');
 [, $b] = req('GET', '/settings');
-[$c] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_model' => '', 'ai_key_clear' => '1']);   // AI off again for the next checks
+[$c] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime + ['ai_model' => '', 'ai_key_clear' => '1', 'check_model' => '', 'check_key_clear' => '1']);   // AI off again for the next checks
 [$c, $b] = req('GET', '/');
 check(str_contains($b, '<strong>2</strong> can be upgraded, <strong>1 security</strong>') && str_contains($b, 'Reboot required (linux-image-6.12.117+deb13-amd64)'),
     'dashboard: packages to upgrade, security ones, reboot required');
