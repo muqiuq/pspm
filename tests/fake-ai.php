@@ -4,7 +4,8 @@
 // tested without a real key. Every request is appended to /tmp/fake-ai.jsonl.
 //
 // Model names steer it: fake-500 → HTTP 500, fake-429 → HTTP 429, fake-garbage → not JSON,
-// fake-benign → every verdict benign. Otherwise, per purpose (recognised by the instructions):
+// fake-benign → every verdict benign, fake-noschema → HTTP 400 for a JSON schema request,
+// fake-badtypes → verdicts that are not of the expected type. Otherwise, per purpose (recognised by the instructions):
 //   scan verdicts: exploit tags → block 0.95; 21 not-found pages → left out of the answer;
 //                  a user agent saying "ignore …" fools it → benign 0.99 (what the injection check prevents)
 //   behaviour:     brute force with risk ≥ 90 → attack 0.9, else risky 0.7
@@ -29,6 +30,7 @@ if (str_ends_with($path, '/classify')) {
 if (str_ends_with($path, '/classify-broken')) out(200, ['result' => 'everything is fine']);
 if (!str_ends_with($path, '/chat/completions')) out(404, ['error' => 'unknown path']);
 $model = (string)($in['model'] ?? '');
+if ($model === 'fake-noschema' && ($in['response_format']['type'] ?? '') === 'json_schema') out(400, ['error' => ['message' => 'response_format json_schema is not supported for this model']]);
 if ($model === 'fake-500') out(500, ['error' => ['message' => 'internal error (fake)']]);
 if ($model === 'fake-429') out(429, ['error' => ['message' => 'rate limited (fake)']]);
 $system = (string)($in['messages'][0]['content'] ?? '');
@@ -50,7 +52,8 @@ if (str_contains($system, 'connection test')) {
     foreach ($user['subjects'] ?? [] as $s) {
         if (($s['not_found'] ?? 0) === 21) continue;   // left out on purpose
         $ua = strtolower(json_encode($s['user_agents'] ?? []) . json_encode($s['untrusted'] ?? []));
-        if ($model === 'fake-benign' || str_contains($ua, 'ignore')) $verdicts[] = ['subject' => $s['subject'], 'verdict' => 'benign', 'confidence' => 0.99, 'reason' => 'looks fine'];
+        if ($model === 'fake-badtypes') $verdicts[] = ['subject' => $s['subject'], 'verdict' => 'maybe', 'confidence' => 'high'];   // not the expected type
+        elseif ($model === 'fake-benign' || str_contains($ua, 'ignore')) $verdicts[] = ['subject' => $s['subject'], 'verdict' => 'benign', 'confidence' => 0.99, 'reason' => 'looks fine'];
         elseif (!empty($s['exploit_tags'])) $verdicts[] = ['subject' => $s['subject'], 'verdict' => 'block', 'confidence' => 0.95, 'reason' => 'exploit attempts'];
         else $verdicts[] = ['subject' => $s['subject'], 'verdict' => 'watch', 'confidence' => 0.5, 'reason' => 'unclear'];
     }

@@ -207,7 +207,7 @@ final class Behaviour
                 . '(should be looked at by an admin), or "normal". Answer only JSON: {"assessments":[{"finding":"f-1","class":"attack|risky|normal","category":"'
                 . implode('|', array_keys(self::PATTERNS)) . '|other","risk":0-100,"confidence":0.0-1.0,"reason":"short","suggested_action":"short"}]}' . AI::UNTRUSTED_NOTE;
             try {
-                [$ans, $callId] = AI::call('main', 'behaviour', $sys, ['findings' => $items], $ps);
+                [$ans, $callId] = AI::call('main', 'behaviour', $sys, ['findings' => $items], $ps, 'assessments');
             } catch (Throwable $e) {
                 break;   // the AI log has the error; the deterministic classes stand
             }
@@ -239,7 +239,7 @@ final class Behaviour
             $verifyCall = null;
             try {
                 if (!AI::available('verify')) throw new RuntimeException('verification model not available');
-                [$vans, $verifyCall] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['findings' => array_values($toVerify)], $ps);
+                [$vans, $verifyCall] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['findings' => array_values($toVerify)], $ps, 'assessments');
                 foreach ((array)($vans['assessments'] ?? []) as $x) {
                     if (!is_array($x) || !preg_match('/^f-(\d+)$/', (string)($x['finding'] ?? ''), $m) || !isset($toVerify[(int)$m[1]]) || isset($verified[(int)$m[1]])) continue;
                     $verified[(int)$m[1]] = ['class' => (string)($x['class'] ?? ''), 'confidence' => max(0.0, min(1.0, (float)($x['confidence'] ?? 0))), 'reason' => (string)($x['reason'] ?? '')];

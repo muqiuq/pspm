@@ -228,6 +228,25 @@ if (is_array($pv)) {
     ok($pv['defaults'] !== [], 'with the renderer\'s defaults it would show differences (the bug this guards against)');
 }
 
+// AI: what leaves the box (scrubbing) and the answer types (docs/security-ai-improvements.md §6)
+eq(AI::scrubPath('/users/anna.meier/profile?tab=1'), '/users/{user}/profile?…', 'scrub: the name after /users/ and the query');
+eq(AI::scrubPath('/mail/anna.meier@example.ch/inbox'), '/mail/{email}/inbox', 'scrub: an e-mail address');
+eq(AI::scrubPath('/team/anna.meier/cv'), '/team/{name}/cv', 'scrub: a first.last name');
+eq(AI::scrubPath('/~bob/secret'), '/~{user}/secret', 'scrub: a home directory');
+eq(AI::scrubPath('/wp-login.php'), '/wp-login.php', 'scrub: file names stay');
+eq(AI::scrubPath('/.env.production'), '/.env.production', 'scrub: dot files stay');
+eq(AI::scrubPath('/config/app.json'), '/config/app.json', 'scrub: app.json stays');
+eq(AI::scrubPath('/api/v1/orders/123456'), '/api/v1/orders/{n}', 'scrub: long numbers');
+$sch = AI::jsonSchema('verdicts');
+ok($sch['required'] === ['verdicts'] && $sch['properties']['verdicts']['items']['properties']['verdict']['enum'] === ['block', 'watch', 'benign']
+    && $sch['properties']['verdicts']['items']['additionalProperties'] === false && in_array('reason', $sch['properties']['verdicts']['items']['required'], true), 'JSON schema: strict, every field listed');
+[$c, $d] = AI::conform('verdicts', ['verdicts' => [['subject' => 'ip-1', 'verdict' => 'block', 'confidence' => 0.9, 'reason' => 'x'],
+    ['subject' => 'ip-2', 'verdict' => 'maybe', 'confidence' => 0.9], ['subject' => 'ip-3', 'verdict' => 'watch', 'confidence' => '0.5'], ['subject' => 'ip-4', 'verdict' => 'benign', 'confidence' => 1]]]);
+ok(array_column($c['verdicts'], 'subject') === ['ip-1', 'ip-4'] && $d === 2, 'answer check: items of another type are dropped and counted (an optional reason may be missing)');
+try { AI::conform('verdicts', ['answer' => 'block everything']); ok(false, 'shape'); } catch (RuntimeException) { ok(true, 'answer check: an answer of another shape is rejected'); }
+[$c] = AI::conform('ok', ['ok' => true]);
+ok($c === ['ok' => true], 'answer check: a single object');
+
 // Review (install.sh): sign-in is part of what a site is reachable by
 $review = function (?array $old, array $new): string {
     $dir = sys_get_temp_dir();

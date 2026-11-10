@@ -67,7 +67,15 @@ for ($i = 0; $i < 25; $i++) $rows[] = ['ip' => '198.51.201.7', 'm' => 'POST', 'u
 $lines($rows);
 SecScan::run(true);
 check((bool)DB::val("SELECT 1 FROM ai_calls WHERE purpose = 'scan' AND status = 500 AND error LIKE '%HTTP 500%'"), 'an HTTP error of a scan call is in the log');
+check(AI::paused('main') !== null && !DB::val("SELECT 1 FROM ai_calls WHERE purpose = 'behaviour' AND status = 500"), 'the error pauses the model: no more calls in this round');
+DB::q("DELETE FROM scan_state WHERE key = 'ai_pause:main'");
+$rows = [];
+for ($i = 0; $i < 25; $i++) $rows[] = ['ip' => '198.51.201.10', 'm' => 'POST', 'uri' => '/login', 'st' => '401', 'ust' => '401', 'out' => 'public'];
+$lines($rows);
+SecScan::ingest();
+$n = 0; Behaviour::analyse($n, true);
 check((bool)DB::val("SELECT 1 FROM ai_calls WHERE purpose = 'behaviour' AND status = 500"), 'an HTTP error of a behaviour call is in the log (was dropped before)');
+DB::q("DELETE FROM scan_state WHERE key = 'ai_pause:main'");
 check(!DB::val("SELECT 1 FROM ai_verdicts WHERE subject = '198.51.201.6/32'"), 'no verdict after an error: the next round tries again');
 $setModel('fake-garbage');
 try { AI::test('main'); check(false, 'garbage'); } catch (RuntimeException) {}
@@ -146,6 +154,8 @@ check(Blocks::isBlocked('198.51.202.2/32'), 'nobody reacted to the disagreement:
 $setVerify('fake-500');
 $v = $scanOne('198.51.202.3', '/.env');
 check(!Blocks::isBlocked('198.51.202.3/32') && $v['outcome'] === 'not verified' && $v['verify_verdict'] === 'error', 'the verifier fails: no automatic block ("not verified")');
+check(AI::paused('verify') !== null, 'and the verifier pauses after its HTTP 500');
+DB::q("DELETE FROM scan_state WHERE key = 'ai_pause:verify'");
 // behaviour: an immediate "attack" block needs the verifier too
 $brute = function (string $ip) use ($lines) {
     $rows = [];
@@ -172,6 +182,51 @@ $setVerify('fake-verify');
 Traps::maintain(true);
 check((int)DB::val("SELECT votes FROM traps WHERE path = '/wp-login.php' AND created_by = 'ai'") >= 1, 'honeypots: confirmed proposals get their vote');
 Settings::set('ai_verify', AI::VERIFY_DEFAULTS);
+
+// ---- hardening (docs/security-ai-improvements.md §6)
+$fake = fn() => array_map(fn($l) => json_decode($l, true), array_filter(explode("\n", (string)file_get_contents('/tmp/fake-ai.jsonl'))));
+$setModel('fake-main');
+$scanOne('198.51.203.1', '/.env');
+$req = array_values(array_filter($fake(), fn($r) => str_contains((string)($r['body']['messages'][0]['content'] ?? ''), 'assess traffic')));
+$last = end($req)['body'];
+check(($last['response_format']['type'] ?? '') === 'json_schema' && ($last['response_format']['json_schema']['name'] ?? '') === 'verdicts'
+    && ($last['response_format']['json_schema']['strict'] ?? false) === true, 'the answer type is sent as a strict JSON schema');
+// a model without schema support: asked again for a JSON object, remembered
+$setModel('fake-noschema');
+$errs = (int)DB::val("SELECT count(*) FROM ai_calls WHERE model = 'fake-noschema' AND status = 400");
+$t = AI::test('main');
+check($t['ok'] && (int)DB::val("SELECT count(*) FROM ai_calls WHERE model = 'fake-noschema' AND status = 400") === $errs + 1, 'no JSON schema support: the 400 is logged, the call is repeated for a JSON object');
+AI::test('main');
+check((int)DB::val("SELECT count(*) FROM ai_calls WHERE model = 'fake-noschema' AND status = 400") === $errs + 1, 'and remembered: the next call asks for a JSON object at once');
+// answers of another type are dropped, never acted on
+$setModel('fake-badtypes');
+$v = $scanOne('198.51.203.2', '/.git/config');
+$c = DB::one("SELECT * FROM ai_calls WHERE purpose = 'scan' ORDER BY id DESC LIMIT 1");
+check(!Blocks::isBlocked('198.51.203.2/32') && (int)(json_dec($c['result'])['_dropped'] ?? 0) >= 1 && $v['outcome'] === 'no answer',
+    'an answer item of another type is dropped and logged; nothing is decided on it');
+// a rate limit pauses the model; a good answer ends the pause
+$setModel('fake-429');
+try { AI::test('main'); } catch (RuntimeException) {}
+$pz = AI::paused('main');
+check($pz && (int)$pz['minutes'] === 15 && !AI::available('main'), 'HTTP 429: the model pauses for 15 minutes');
+DB::q("UPDATE scan_state SET value = jsonb_set(value, '{until}', to_jsonb((now() - interval '1 minute')::text)) WHERE key = 'ai_pause:main'");
+try { AI::test('main'); } catch (RuntimeException) {}
+check((int)AI::paused('main')['minutes'] === 30, 'another 429 soon after: the pause doubles');
+DB::q("UPDATE scan_state SET value = jsonb_set(value, '{until}', to_jsonb((now() - interval '1 minute')::text)) WHERE key = 'ai_pause:main'");
+$setModel('fake-main');
+AI::test('main');
+check(AI::paused('main') === null && !DB::val("SELECT 1 FROM scan_state WHERE key = 'ai_pause:main'"), 'a good answer ends the pause');
+// feedback: admins remove more than 20 % of at least 5 AI blocks → dry-run
+Settings::set('scan', array_replace(Settings::get('scan', []), ['feedback_since' => SecScan::preciseNow()]));
+for ($i = 1; $i <= 5; $i++) DB::q("INSERT INTO block_history (ip, source, reason, duration_secs, created_by, removed_at, removed_by) VALUES (?::cidr, 'ai', 'test', 86400, 'system', ?, ?)",
+    ["198.51.204.$i/32", $i <= 2 ? gmdate('c') : null, $i <= 2 ? 'admin' : null]);
+$note = SecScan::feedback();
+check($note && AI::settings()['mode'] === 'dry-run' && $note['removed'] === 2 && $note['blocks'] === 5, 'feedback: 2 of 5 AI blocks removed by admins → the AI switches to dry-run');
+check((bool)DB::val("SELECT 1 FROM notification_outbox WHERE subject LIKE '%AI switched to dry-run%'") || !Notify::configured(), 'feedback: an e-mail says so (when e-mail is set up)');
+$ai = AI::settings(); $ai['mode'] = 'enforce'; Settings::set('ai', $ai);
+Settings::set('scan', array_replace(Settings::get('scan', []), ['feedback_since' => SecScan::preciseNow(), 'feedback_tripped' => null]));
+check(SecScan::feedback() === null && AI::settings()['mode'] === 'enforce', 'feedback: after an admin sets enforce again, only new blocks count');
+DB::q("DELETE FROM block_history WHERE reason = 'test' AND source = 'ai'");
 
 $ai = AI::settings(); $ai['model'] = ''; Settings::set('ai', $ai);
 echo "ai checks passed\n";

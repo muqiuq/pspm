@@ -21,6 +21,8 @@ if (is_post()) {
                 $ai = AI::settings();
                 $ai['mode'] = Validate::enum(post('mode'), ['enforce', 'dry-run', 'collect']) ?? 'enforce';
                 Settings::set('ai', $ai);
+                // back to enforce: the feedback rule counts AI blocks from now on, and its note goes
+                if ($ai['mode'] === 'enforce') Settings::set('scan', array_replace(Settings::get('scan', []), ['feedback_since' => SecScan::preciseNow(), 'feedback_tripped' => null]));
                 Audit::log('scan.mode', null, ['mode' => $ai['mode']]);
                 flash("Scan mode: {$ai['mode']}.");
                 break;
@@ -125,6 +127,9 @@ if ($tab === 'overview'):
       <div class="col-lg-4"><div class="card"><div class="card-body small">
         <h2 class="h6">Scan</h2>
         <div>Mode: <strong><?= h($ai['mode']) ?></strong> · AI: <?= AI::configured() ? h($ai['model']) : 'off (no model or key; set it in Settings)' ?></div>
+        <?php $fb = Settings::get('scan', [])['feedback_tripped'] ?? null; if ($fb && $ai['mode'] === 'dry-run'): ?>
+          <div class="text-warning-emphasis">Switched to dry-run by itself at <?= h(fmt_time($fb['at'])) ?>: admins removed <?= h($fb['removed']) ?> of <?= h($fb['blocks']) ?> AI blocks
+            within 7 days. Check them (AI log), then set the mode back to enforce.</div><?php endif; ?>
         <div>Last run: <?= $last ? h(ago($last['started_at'])) . ' — ' . h($last['stats']) : 'never' ?></div>
         <div>AI calls in 24 h: <?= AI::callsToday() ?> / <?= h($ai['daily_cap']) ?></div>
         <?php if ($scan['breaker_tripped'] ?? false): ?><div class="text-danger mt-1">Circuit breaker tripped <?= h(ago($scan['breaker_at'] ?? null)) ?>: the scan only reports what it would block.</div>
@@ -281,7 +286,8 @@ if ($tab === 'overview'):
     <table class="table table-sm small mb-3"><thead><tr><th>Model (24 h)</th><th>Calls / cap</th><th>Errors</th><th>Tokens in / out</th><th>Cost</th><th>Average duration</th></tr></thead><tbody>
     <?php foreach (AI::ROLES as $role => $label): $f = $fig[$role] ?? null; $mm = AI::model($role); ?>
       <tr><td><?= h($label) ?> <span class="text-muted"><?= h($mm['model'] ?: 'not set') ?></span>
-        <?= $role === 'check' ? '<div>injection attempts found: ' . ($injections ? badge('amber', (string)$injections) : '0') . '</div>' : '' ?></td>
+        <?= $role === 'check' ? '<div>injection attempts found: ' . ($injections ? badge('amber', (string)$injections) : '0') . '</div>' : '' ?>
+        <?php if ($pz = AI::paused($role)): ?><div><?= badge('amber', 'paused') ?> until <?= h(fmt_time($pz['until'], 'H:i')) ?> after HTTP <?= h($pz['status']) ?> (<?= h($pz['minutes']) ?> min)</div><?php endif; ?></td>
         <td><?= h($f['calls'] ?? 0) ?> / <?= h($mm['daily_cap']) ?></td><td><?= ($f['errors'] ?? 0) ? badge('red', (string)$f['errors']) : '0' ?></td>
         <td><?= h(number_format((int)($f['tin'] ?? 0))) ?> / <?= h(number_format((int)($f['tout'] ?? 0))) ?></td>
         <td><?= isset($f['cost']) && $f['cost'] !== null ? '$' . h(number_format((float)$f['cost'], 4)) : '—' ?></td><td><?= isset($f['ms']) ? h($f['ms']) . ' ms' : '—' ?></td></tr>
@@ -313,6 +319,7 @@ if ($tab === 'overview'):
             <?php if ($bad): ?><ul class="list-unstyled mb-0"><?php foreach ($bad as $x): ?><li><code><?= h($x['text'] ?? '') ?></code> <?= h(round((float)($x['score'] ?? 1), 2)) ?><?= !empty($x['invalid']) ? ' (answer not of the fixed type)' : '' ?></li><?php endforeach; ?></ul><?php endif; ?>
           <?php elseif ($c['purpose'] === 'test'): ?><?= ($res['ok'] ?? null) === true ? badge('green', 'ok') : badge('amber', 'unexpected answer') ?>
           <?php else: ?><?= badge('green', 'answered') ?><?php endif; ?>
+          <?= !empty($res['_dropped']) ? '<div>' . badge('amber', $res['_dropped'] . ' dropped') . ' not of the expected type</div>' : '' ?>
           <details class="mt-1"><summary class="text-muted">show request and answer</summary>
             <div class="mt-1"><strong>Sent</strong> (HTTP <?= h($c['status']) ?>)<pre class="small mb-1"><?= $pretty(json_dec($c['request'])) ?></pre>
             <strong>Answer</strong><pre class="small mb-1"><?= h((string)$c['response']) ?></pre>

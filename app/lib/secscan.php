@@ -256,6 +256,8 @@ final class SecScan
         DB::q("DELETE FROM ai_check_cache WHERE at < now() - interval '24 hours'");   // injection check results: 24 h
         DB::q("DELETE FROM expected_patterns WHERE until < now()");
 
+        self::feedback();
+
         // candidates: untrusted addresses over a threshold in 24 h (plan §15.1)
         $rows = DB::all("SELECT ip::text AS ip, jsonb_agg(data) AS d FROM ip_activity WHERE hour > now() - interval '24 hours' GROUP BY ip");
         $cands = [];
@@ -300,7 +302,7 @@ final class SecScan
                     . 'for normal users, crawlers or monitoring. Answer only JSON: {"verdicts":[{"subject":"ip-1","verdict":"block|watch|benign",'
                     . '"confidence":0.0-1.0,"reason":"one short sentence"}]}' . AI::UNTRUSTED_NOTE;
                 try {
-                    [$ans, $callId] = AI::call('main', 'scan', $sys, ['subjects' => $subjects], $ps);   // logged in the AI log
+                    [$ans, $callId] = AI::call('main', 'scan', $sys, ['subjects' => $subjects], $ps, 'verdicts');   // logged in the AI log
                     $stats['ai_calls']++;
                 } catch (Throwable $e) {
                     break;   // the AI log has the error; the next round tries again
@@ -350,6 +352,41 @@ final class SecScan
         return $stats;
     }
 
+    public const FEEDBACK_SHARE = 0.2;   // more than 20 % of the AI blocks removed by admins …
+    public const FEEDBACK_MIN = 5;       // … of at least 5 in 7 days: the AI switches itself to dry-run
+
+    /** Now, to the microsecond (the start of the feedback window when an admin sets enforce). */
+    public static function preciseNow(): string
+    {
+        return (new DateTimeImmutable('now', new DateTimeZone('UTC')))->format('Y-m-d\TH:i:s.uP');
+    }
+
+    /**
+     * Feedback (docs/security-ai-improvements.md §6): if admins remove more than 20 % of at least
+     * 5 AI blocks within 7 days, the AI switches itself to dry-run and says so by e-mail. Only
+     * blocks since an admin last set the mode to enforce count.
+     */
+    public static function feedback(): ?array
+    {
+        $ai = AI::settings();
+        if ($ai['mode'] !== 'enforce') return null;
+        $scan = Settings::get('scan', []);
+        $since = is_string($scan['feedback_since'] ?? null) && strtotime($scan['feedback_since']) ? $scan['feedback_since'] : null;
+        $r = DB::one("SELECT count(*) AS blocks, count(*) FILTER (WHERE removed_by IS NOT NULL AND removed_by NOT LIKE 'system%') AS removed
+                      FROM block_history WHERE source = 'ai' AND created_at > greatest(now() - interval '7 days', coalesce(CAST(? AS timestamptz), '-infinity'))", [$since]);
+        $blocks = (int)$r['blocks']; $removed = (int)$r['removed'];
+        if ($blocks < self::FEEDBACK_MIN || $removed <= self::FEEDBACK_SHARE * $blocks) return null;
+        $ai['mode'] = 'dry-run';
+        Settings::set('ai', $ai);
+        $note = ['at' => gmdate('c'), 'blocks' => $blocks, 'removed' => $removed];
+        Settings::set('scan', array_replace($scan, ['feedback_tripped' => $note]));
+        Audit::log('scan.feedback', null, $note);
+        Notify::event('health', 'AI switched to dry-run: too many of its blocks were removed',
+            "Admins removed $removed of the $blocks blocks the AI placed in the last 7 days (more than " . (int)(100 * self::FEEDBACK_SHARE) . " %).\n"
+            . "The scan now only reports what it would block. Check the AI log on the Security page, then set the mode back to enforce.", 'ai-feedback');
+        return $note;
+    }
+
     /**
      * The verifier's verdicts on block candidates (docs/security-ai-improvements.md §3).
      * @return array{0: array<string, array{verdict: string, confidence: float, reason: string}>, 1: ?int, 2: bool} by subject, call id, failed
@@ -358,7 +395,7 @@ final class SecScan
     {
         if (!AI::available('verify')) return [[], null, true];
         try {
-            [$ans, $id] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['subjects' => $subjects], $ps);
+            [$ans, $id] = AI::call('verify', 'verify', $sys . AI::VERIFY_NOTE, ['subjects' => $subjects], $ps, 'verdicts');
         } catch (Throwable) {
             return [[], null, true];   // the AI log has the error
         }

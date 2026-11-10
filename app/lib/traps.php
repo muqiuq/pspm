@@ -240,7 +240,7 @@ final class Traps
             . '(e.g. /.env, /.git/config, /wp-login.php on sites without WordPress). Never propose paths a real application may serve, '
             . 'or anything a backend answered with something other than 404/410. Answer only JSON: {"patterns":[{"host":"host-1 or *",'
             . '"kind":"exact|prefix","path":"/...","reason":"short"}]}' . AI::UNTRUSTED_NOTE;
-        try { [$ans, $callId] = AI::call('main', 'honeypots', $sys, ['paths' => $items], $ps); }   // logged in the AI log
+        try { [$ans, $callId] = AI::call('main', 'honeypots', $sys, ['paths' => $items], $ps, 'patterns'); }   // logged in the AI log
         catch (Throwable $e) { return 0; }
         $window = gmdate('Y-m-d\TH:00:00\Z', intdiv(time(), 10800) * 10800);
         $n = 0;
@@ -263,7 +263,7 @@ final class Traps
             try {
                 if (!AI::available('verify')) throw new RuntimeException('verification model not available');
                 [$vans, $verifyCall] = AI::call('verify', 'verify', $vsys, ['proposals' => array_map(fn($k, $x) => ['p' => $k, 'host' => $x['host'] === '*' ? '*' : $ps->of('host', $x['host']),
-                    'kind' => $x['kind'], 'path' => $x['path'], 'reason' => AI::untrusted($x['reason'], 200)], array_keys($props), $props), 'evidence' => $items], $ps);
+                    'kind' => $x['kind'], 'path' => $x['path'], 'reason' => AI::untrusted($x['reason'], 200)], array_keys($props), $props), 'evidence' => $items], $ps, 'decisions');
                 foreach ((array)($vans['decisions'] ?? []) as $d) if (is_array($d) && ($d['decision'] ?? '') === 'confirm' && isset($props[$d['p'] ?? ''])) $ok[$d['p']] = true;
             } catch (Throwable) {
                 // no answer from the verifier: no votes in this window (the AI log has the error)
