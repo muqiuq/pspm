@@ -116,9 +116,49 @@ final class Behaviour
         return array_map(fn($x) => ['pattern' => $x[0], 'risk' => (int)$x[1], 'class' => $x[2], 'evidence' => $x[3]], $f);
     }
 
-    public static function analyse(int &$runBlocks): array
+    public const DEFAULT_INTERVAL_HOURS = 12;
+
+    /** Hours between two searches for findings (Settings → Blocking and trust; default 12). */
+    public static function intervalHours(): int
+    {
+        return max(1, min(168, (int)(Settings::get('behaviour', [])['interval_hours'] ?? self::DEFAULT_INTERVAL_HOURS)));
+    }
+
+    /** When the search for findings ran last and is due next (Unix times; null: never ran). */
+    public static function lastSearch(): ?int
+    {
+        $last = SecScan::state('behaviour_search');
+        return $last ? (strtotime((string)$last['at']) ?: null) : null;
+    }
+
+    public static function nextSearch(): ?int
+    {
+        $last = self::lastSearch();
+        return $last === null ? null : $last + 3600 * self::intervalHours();
+    }
+
+    /**
+     * The behaviour part of a scan round (plan §15.7): the search for findings runs every
+     * intervalHours() (12 by default) or when forced ("Run now"); reaction deadlines and
+     * reminders are checked every round, so a block after the reaction time is not late.
+     */
+    public static function analyse(int &$runBlocks, bool $force = false): array
     {
         $st = ['findings' => 0, 'assessed' => 0, 'blocked' => 0, 'reminders' => 0];
+        $next = self::nextSearch();
+        if ($force || $next === null || time() >= $next) {
+            self::search($runBlocks, $st);
+            SecScan::setState('behaviour_search', ['at' => gmdate('c')]);
+        } else {
+            $st['next_search'] = gmdate('c', $next);
+        }
+        self::deadlines($runBlocks, $st);
+        return $st;
+    }
+
+    /** Detectors over the last 24 h, the AI assessment, findings and their notifications. */
+    private static function search(int &$runBlocks, array &$st): void
+    {
         self::updateBaselines();
         $ai = AI::settings();
         $cands = [];
@@ -197,7 +237,11 @@ final class Behaviour
                 . ($deadline ? "\n\nNobody reacted: the address is blocked at " . fmt_time($deadline, 'Y-m-d H:i') . ". React on Security → Behaviour." : ''),
                 "finding:$id");
         }
-        // reminders 2 h before the deadline, blocks when it has passed (plan §15.7)
+    }
+
+    /** Reminders 2 h before the deadline, blocks when it has passed (plan §15.7). */
+    private static function deadlines(int &$runBlocks, array &$st): void
+    {
         foreach (DB::all("SELECT * FROM risk_findings WHERE status = 'open' AND deadline IS NOT NULL") as $f) {
             $left = strtotime($f['deadline']) - time();
             $n = json_dec($f['notified']) ?? [];
@@ -218,7 +262,6 @@ final class Behaviour
                 }
             }
         }
-        return $st;
     }
 
     public static function describe(string $type, string $actor): string

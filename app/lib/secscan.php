@@ -316,7 +316,7 @@ final class SecScan
                 }
             }
         }
-        $stats['behaviour'] = Behaviour::analyse($runBlocks);
+        $stats['behaviour'] = Behaviour::analyse($runBlocks, $runNow);   // findings every 12 h by default, deadlines every round
         $stats['traps'] = Traps::maintain($runNow);
         State::publish('blocked', 'trusted', 'cleared', 'traps', 'meta');
         return $stats;

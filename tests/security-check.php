@@ -37,12 +37,23 @@ check($g && $g['authorised'] && $g['deadline'] === null, 'shared certificate: an
 $r2 = SecScan::run(true);
 check($r2['lines'] === 0, 'the cursor does not read lines twice');
 check((int)DB::val("SELECT count(*) FROM risk_findings WHERE pattern = 'brute_force'") === 1, 'no duplicate finding');
-// no reaction: the deadline passes and the address is blocked (but never an authorised one)
+// schedule: the search for findings every 12 hours by default, deadlines every round
+check(Behaviour::intervalHours() === 12, 'behaviour: search for findings every 12 hours by default');
+$n = 0; $b = Behaviour::analyse($n, false);
+check(isset($b['next_search']) && abs(strtotime($b['next_search']) - (time() + 12 * 3600)) < 120, 'behaviour: right after a search the next one is 12 hours away');
+// no reaction: the deadline passes and the address is blocked (but never an authorised one) — also between searches
 DB::q("UPDATE risk_findings SET deadline = now() - interval '1 minute' WHERE id = ?", [$f['id']]);
-SecScan::run(true);
-check(Blocks::isBlocked('198.51.200.13/32'), 'no reaction within the reaction time: blocked');
+$n = 0; $b = Behaviour::analyse($n, false);
+check(isset($b['next_search']), 'behaviour: no search in this round');
+check(Blocks::isBlocked('198.51.200.13/32'), 'no reaction within the reaction time: blocked (deadlines are checked every round)');
 check(DB::val('SELECT status FROM risk_findings WHERE id = ?', [$f['id']]) === 'blocked', 'the finding says blocked');
 check(!Blocks::isBlocked('100.1.0.5/32'), 'the authorised actor is not blocked');
+SecScan::setState('behaviour_search', ['at' => gmdate('c', time() - 13 * 3600)]);
+$n = 0; $b = Behaviour::analyse($n, false);
+check(!isset($b['next_search']), 'behaviour: 13 hours after the last search, the round searches again');
+Settings::set('behaviour', ['interval_hours' => 3]);
+check(Behaviour::nextSearch() - (int)Behaviour::lastSearch() === 3 * 3600, 'behaviour: the interval follows the setting');
+Settings::set('behaviour', ['interval_hours' => Behaviour::DEFAULT_INTERVAL_HOURS]);
 // an admin removal is respected for 30 days
 Blocks::remove('198.51.200.13/32', 'test', false);
 check(Blocks::guard('198.51.200.13', 'block', 1.0) !== null, 'after an admin removed a block, the guard refuses for 30 days');

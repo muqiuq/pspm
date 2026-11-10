@@ -31,6 +31,7 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
     Settings::set('unknown_hosts', ['threshold' => Validate::int(post('unknown_threshold'), 0, 1000) ?? 5, 'window' => 60 * (Validate::int(post('unknown_window'), 1, 1440) ?? 60)]);
     Settings::set('traps', ['enabled' => isset($_POST['traps_enabled'])]);
     Settings::set('trust', ['authorised_days' => Validate::int(post('authorised_days'), 1, 365) ?? 30]);
+    Settings::set('behaviour', ['interval_hours' => Validate::int(post('behaviour_hours'), 1, 168) ?? Behaviour::DEFAULT_INTERVAL_HOURS]);
     Settings::set('pki', ['strict' => isset($_POST['pki_strict'])]);
     Settings::set('firewall_enforcement', isset($_POST['firewall_enforcement']));
     $smtp = Notify::smtp();
@@ -166,6 +167,7 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
       <?= f_check('traps_enabled', 'Honeypots', (bool)(Settings::get('traps', [])['enabled'] ?? true)) ?>
       <?= f_check('firewall_enforcement', 'Firewall enforcement (blocks and blocklists drop on every port)', (bool)Settings::get('firewall_enforcement')) ?>
       <?= f_text('authorised_days', 'Authorised addresses expire after (days without a new authorisation)', (int)(Settings::get('trust', [])['authorised_days'] ?? 30), [], '', 'number') ?>
+      <?= f_text('behaviour_hours', 'Search for risky behaviour every (hours)', Behaviour::intervalHours(), [], 'Default 12. Looks at the last 24 hours each time. Reaction deadlines and reminders are checked every 5 minutes regardless.', 'number') ?>
       <?= f_check('pki_strict', 'Strict certificates: from a CA that PSPM issues with, only certificates PSPM issued count', (bool)(Settings::get('pki', [])['strict'] ?? true)) ?>
     <?= $end ?>
     <?= $card('mail', 'E-mail notifications', 'SMTP relay for findings, health problems and account events. Each user sets their address under Account.') ?>

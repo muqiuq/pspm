@@ -153,6 +153,10 @@ if ($tab === 'overview'):
     $findings = DB::all("SELECT * FROM risk_findings ORDER BY (status = 'open') DESC, created_at DESC LIMIT 200"); ?>
     <p class="small text-muted">Behaviour over time per address, certificate, signed-in user and access link (plan §15.7). Findings about authorised actors are never blocked automatically.
       A risky untrusted address is blocked when nobody reacts within <?= h($ai['reaction_hours']) ?> hours.</p>
+    <?php $lastS = Behaviour::lastSearch(); $nextS = Behaviour::nextSearch(); ?>
+    <p class="small">Search for findings every <?= h(Behaviour::intervalHours()) ?> hours (<a href="/settings#blocking">Settings</a>):
+      last <?= $lastS ? h(date('Y-m-d H:i', $lastS)) : 'never' ?>, next <?= $nextS ? h(date('Y-m-d H:i', max($nextS, time()))) : 'with the next scan round' ?>.
+      <em>Run now</em> on the overview searches at once. Reaction deadlines and reminders are checked every 5 minutes.</p>
     <table class="table table-sm small align-middle"><thead><tr><th>#</th><th>Actor</th><th>Pattern</th><th>Risk</th><th>Status</th><th>Evidence</th><th></th></tr></thead><tbody>
     <?php foreach ($findings as $f): $ev = json_dec($f['evidence']) ?? []; $assess = json_dec($f['ai'] ?? 'null'); ?>
       <tr class="<?= $f['status'] === 'open' ? '' : 'text-muted' ?>"><td><?= h($f['id']) ?></td>
