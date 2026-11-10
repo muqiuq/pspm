@@ -200,9 +200,10 @@ final class Behaviour
                     'paths' => array_map([AI::class, 'scrubPath'], array_slice(array_keys($feat['paths'] ?? []), 0, 25)),
                     'user_agents' => array_slice(array_keys($feat['uas'] ?? []), 0, 3)];
             }
+            [$items] = AI::shield($items, ['paths' => 200, 'user_agents' => 120]);   // injection check
             $sys = 'You assess behaviour seen by a reverse proxy over 24 hours. For each finding classify it: "attack" (clearly malicious), "risky" '
                 . '(should be looked at by an admin), or "normal". Answer only JSON: {"assessments":[{"finding":"f-1","class":"attack|risky|normal","category":"'
-                . implode('|', array_keys(self::PATTERNS)) . '|other","risk":0-100,"confidence":0.0-1.0,"reason":"short","suggested_action":"short"}]}';
+                . implode('|', array_keys(self::PATTERNS)) . '|other","risk":0-100,"confidence":0.0-1.0,"reason":"short","suggested_action":"short"}]}' . AI::UNTRUSTED_NOTE;
             try {
                 [$ans, $callId] = AI::call('main', 'behaviour', $sys, ['findings' => $items], $ps);
             } catch (Throwable $e) {

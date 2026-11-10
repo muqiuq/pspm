@@ -230,13 +230,16 @@ final class Traps
         $items = [];
         foreach ($rows as $r) {
             $d = json_dec($r['data']);
-            $items[] = ['host' => $ps->of('host', $r['host']), 'path' => AI::scrubPath($r['path']), 'requests' => $d['total'] ?? 0,
+            $items[] = ['host' => $ps->of('host', $r['host']), 'path' => [AI::scrubPath($r['path'])], 'requests' => $d['total'] ?? 0,
                 'refused' => $d['refused'] ?? 0, 'backend_answers' => $d['ust'] ?? new stdClass(), 'clients' => count($d['ips'] ?? [])];
         }
+        [$items] = AI::shield($items, ['path' => 200]);   // injection check; without one only path-shaped strings
+        $items = array_values(array_filter($items, fn($x) => ($x['untrusted']['path'] ?? []) !== [] && $x['untrusted']['path'][0] !== AI::REMOVED));
+        if (!$items) return 0;
         $sys = 'You design honeypot rules for a reverse proxy. From refused request paths, propose patterns that only attackers request '
             . '(e.g. /.env, /.git/config, /wp-login.php on sites without WordPress). Never propose paths a real application may serve, '
             . 'or anything a backend answered with something other than 404/410. Answer only JSON: {"patterns":[{"host":"host-1 or *",'
-            . '"kind":"exact|prefix","path":"/...","reason":"short"}]}';
+            . '"kind":"exact|prefix","path":"/...","reason":"short"}]}' . AI::UNTRUSTED_NOTE;
         try { [$ans, $callId] = AI::call('main', 'honeypots', $sys, ['paths' => $items], $ps); }   // logged in the AI log
         catch (Throwable $e) { return 0; }
         $window = gmdate('Y-m-d\TH:00:00\Z', intdiv(time(), 10800) * 10800);

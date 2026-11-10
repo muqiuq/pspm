@@ -42,6 +42,19 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail', 'test_model']
     $ai['analyse_authorised'] = isset($_POST['ai_authorised']);
     $ai['reaction_hours'] = Validate::int(post('reaction_hours'), 1, 720) ?? $ai['reaction_hours'];
     Settings::set('ai', $ai);
+    // the injection check
+    $ck = array_replace(AI::CHECK_DEFAULTS, (array)Settings::get('ai_check', []));
+    $ck['type'] = Validate::enum(post('check_type'), ['classifier', 'chat']) ?? 'classifier';
+    $ck['model'] = preg_match('#^[A-Za-z0-9._:/@-]{0,100}$#', trim((string)post('check_model'))) ? trim((string)post('check_model')) : $ck['model'];
+    $ck['same_as_main'] = isset($_POST['check_same']);
+    $u = trim((string)post('check_base_url'));
+    if ($u !== '' && ($p = AI::urlProblem($u))) $errors['check_base_url'] = "Injection check, API URL: $p";
+    else $ck['base_url'] = $u;
+    if (trim((string)post('check_key')) !== '') $ck['key_enc'] = Crypto::seal(trim((string)post('check_key')));
+    if (isset($_POST['check_key_clear'])) $ck['key_enc'] = '';
+    $ck['daily_cap'] = Validate::int(post('check_daily_cap'), 1, 100000) ?? $ck['daily_cap'];
+    $ck['threshold'] = max(0.05, min(0.99, (float)post('check_threshold', $ck['threshold'])));
+    Settings::set('ai_check', $ck);
     Settings::set('unknown_hosts', ['threshold' => Validate::int(post('unknown_threshold'), 0, 1000) ?? 5, 'window' => 60 * (Validate::int(post('unknown_window'), 1, 1440) ?? 60)]);
     Settings::set('traps', ['enabled' => isset($_POST['traps_enabled'])]);
     Settings::set('trust', ['authorised_days' => Validate::int(post('authorised_days'), 1, 365) ?? 30]);
@@ -105,7 +118,8 @@ $modelGroup = function (string $role, string $p, string $what, array $m, array $
     $o .= f_text("{$p}_base_url", 'API base URL', $m['base_url'], $errors, $extra['url_help'] ?? 'OpenAI-compatible, e.g. https://openrouter.ai/api/v1', 'text', "{$p}_base_url");
     $o .= f_text("{$p}_key", 'API key' . ($m['key_enc'] ? ' (set; empty keeps it)' : ''), '', [], 'Stored encrypted.', 'password', '', ['autocomplete' => 'new-password']);
     $o .= $m['key_enc'] ? f_check("{$p}_key_clear", 'Remove the key', false) : '';
-    $o .= '</div><div class="row align-items-end"><div class="col-6">' . f_text("{$p}_daily_cap", 'Calls per day at most', $m['daily_cap'], [], '', 'number') . '</div>'
+    $o .= '</div>' . implode('', $extra['after'] ?? []);
+    $o .= '<div class="row align-items-end"><div class="col-6">' . f_text("{$p}_daily_cap", 'Calls per day at most', $m['daily_cap'], [], '', 'number') . '</div>'
         . '<div class="col-6 mb-3"><button class="btn btn-sm btn-outline-secondary" form="test-model-form" name="role" value="' . h($role) . '">Test</button>'
         . ' <span class="small text-muted">uses the saved settings</span></div></div>';
     return $o . '</fieldset>';
@@ -123,7 +137,7 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 
 <div class="settings-group col-xxl-10" id="configuration">
 <h2 class="h5">Configuration <span class="badge text-bg-warning align-middle">applied with install.sh</span></h2>
-<?= errors_box(array_diff_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1]) ? ['Please correct the marked fields.'] : []) ?>
+<?= errors_box(array_diff_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1]) ? ['Please correct the marked fields.'] : []) ?>
 <form method="post"><?= csrf_field() ?>
 <div class="row g-3">
   <div class="col-lg-6">
@@ -166,7 +180,7 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 
 <div class="settings-group col-xxl-10 mt-5" id="runtime">
 <h2 class="h5">Runtime <span class="badge text-bg-success align-middle">takes effect at once</span></h2>
-<?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1])) ?>
+<?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1])) ?>
 <form method="post" id="test-mail-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_mail"></form>
 <form method="post" id="test-model-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_model"></form>
 <form method="post" autocomplete="off"><?= csrf_field() ?><input type="hidden" name="action" value="runtime">
@@ -182,6 +196,16 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
     <?= $card('models', 'Models', 'One field group per model. Only pseudonymised evidence leaves the box; every call is in Security → AI log.') ?>
       <?= $modelGroup('main', 'ai', 'Scan verdicts, behaviour assessments and honeypot proposals. Empty model: AI off; honeypots and the guards keep working.', AI::model('main'),
           ['model_help' => 'e.g. a fast, inexpensive model']) ?>
+      <?php $ck = AI::model('check'); ?>
+      <?= $modelGroup('check', 'check', 'Screens every attacker-written string (paths, user agents) before a model sees it. Its answer has one fixed type, '
+          . '{label: safe|injection, score}; anything else counts as injection. Flagged strings are removed and the address is tagged. Off or failing: '
+          . 'user agents are left out and only path-shaped paths are sent.', $ck, [
+          'before' => [f_select('check_type', 'Type', $ck['type'], ['classifier' => 'Classifier API (e.g. Llama Prompt Guard 2 behind a Hugging Face-style endpoint)',
+              'chat' => 'Chat model (OpenAI-compatible) asked for the fixed type'])],
+          'model_help' => 'Classifier: a name for the log and the cache. Chat: the model id. Empty: off.',
+          'url_help' => 'Classifier: the full URL that takes {"inputs": [...]}. Chat: the OpenAI-compatible base URL.',
+          'same' => f_check('check_same', 'Chat: same API URL and key as the main model', $ck['same_as_main']),
+          'after' => [f_text('check_threshold', 'Injection from score', $ck['threshold'], [], '0.05–0.99; the score is the probability of an injection')]]) ?>
     <?= $end ?>
     <?= $card('ai', 'AI decisions', 'How AI answers turn into blocks; these apply to every model.') ?>
       <?= f_text('ai_confidence', 'Block from confidence', $ai['confidence'], [], '0.5–0.99') ?>

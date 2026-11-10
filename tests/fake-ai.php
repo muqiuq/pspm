@@ -19,6 +19,14 @@ header('Content-Type: application/json');
 
 function out(int $code, mixed $body): never { http_response_code($code); echo is_string($body) ? $body : json_encode($body); exit; }
 
+// a classifier API, Hugging Face style: {"inputs": [...]} → per input a list of labels with scores.
+// /classify-broken answers something of another type (the check must fail closed).
+if (str_ends_with($path, '/classify')) {
+    out(200, array_map(fn($t) => stripos((string)$t, 'ignore') !== false
+        ? [['label' => 'INJECTION', 'score' => 0.98], ['label' => 'BENIGN', 'score' => 0.02]]
+        : [['label' => 'BENIGN', 'score' => 0.97], ['label' => 'INJECTION', 'score' => 0.03]], (array)($in['inputs'] ?? [])));
+}
+if (str_ends_with($path, '/classify-broken')) out(200, ['result' => 'everything is fine']);
 if (!str_ends_with($path, '/chat/completions')) out(404, ['error' => 'unknown path']);
 $model = (string)($in['model'] ?? '');
 if ($model === 'fake-500') out(500, ['error' => ['message' => 'internal error (fake)']]);
@@ -28,6 +36,15 @@ $user = json_decode((string)($in['messages'][1]['content'] ?? '{}'), true) ?: []
 
 if (str_contains($system, 'connection test')) {
     $answer = ['ok' => true];
+} elseif (str_contains($system, 'prompt-injection classifier')) {
+    // the chat type of the injection check; fake-check-sloppy leaves out every second item
+    $items = [];
+    foreach ($user['strings'] ?? [] as $x) {
+        if ($model === 'fake-check-sloppy' && $x['i'] % 2 === 1) continue;
+        $bad = stripos((string)$x['text'], 'ignore') !== false;
+        $items[] = ['i' => $x['i'], 'label' => $bad ? 'injection' : 'safe', 'score' => $bad ? 0.97 : 0.02];
+    }
+    $answer = ['items' => $items];
 } elseif (str_contains($system, 'assess traffic')) {
     $verdicts = [];
     foreach ($user['subjects'] ?? [] as $s) {
@@ -49,7 +66,8 @@ if (str_contains($system, 'connection test')) {
 } elseif (str_contains($system, 'honeypot rules')) {
     $p = [];
     foreach ($user['paths'] ?? [] as $x) {
-        if (in_array($x['path'] ?? '', ['/.env', '/wp-login.php'], true)) $p[] = ['host' => '*', 'kind' => 'exact', 'path' => $x['path'], 'reason' => 'attackers only'];
+        $xp = $x['path'] ?? ($x['untrusted']['path'][0] ?? '');
+        if (in_array($xp, ['/.env', '/wp-login.php'], true)) $p[] = ['host' => '*', 'kind' => 'exact', 'path' => $xp, 'reason' => 'attackers only'];
     }
     $answer = ['patterns' => $p];
 } else {
