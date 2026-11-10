@@ -148,7 +148,8 @@ answer has one fixed type, checked by PSPM:
   24 h by hash, which saves most calls.
 - **Candidates:** dedicated injection classifiers, for example Meta's *Llama Prompt
   Guard 2* (86M or 22M) or ProtectAI's *deberta-v3-base-prompt-injection-v2*.
-  *Open:* "jev", the model named for this, still has to be identified.
+  "jev" stands for exactly this: a type-safe model. Any classifier with the endpoint
+  below, or any chat model held to the fixed type, can be it.
 - **Where it runs, open:**
   - **locally on the box:** no data leaves; needs an inference runtime and a few hundred
     MB of memory, which is tight on a 2 GB box
@@ -160,11 +161,30 @@ answer has one fixed type, checked by PSPM:
   *jailbreak*, *malicious*, *unsafe* or `LABEL_1` count). *Chat model*: an
   OpenAI-compatible model asked for `{"items": [{"i", "label", "score"}]}`; a missing item
   counts as injection. Plain HTTP is accepted only for `127.0.0.1` or `localhost`.
-- *Built, fail closed:* without a working check, user agents are left out, but paths that
-  are path-shaped (letters, digits, `. _ ~ / -`, no spaces or %-encoding, at most 100
-  characters) are still sent: they cannot carry a sentence, and without them honeypot
-  mining could not work. A flagged address is already a candidate; it gets the tag
-  `injection`.
+- *Built, fail closed:* without a working check (off, paused, over its cap) only what
+  cannot carry a sentence is sent:
+  - **paths:** path-shaped ones, meaning letters, digits, `. _ ~ / -` and the scrubbing's
+    placeholders (`{n}`, `{user}` …, a trailing `?…`), no spaces or %-encoding, at most
+    100 characters
+  - **user agents:** their product name only, e.g. `sqlmap/1.7.2` or `Mozilla/5.0`
+
+  Each such prompt is marked, and the AI log counts them, so a starved model shows. A
+  flagged address is already a candidate; it gets the tag `injection`.
+- *Built, capacity:* 100 strings per check call, a default cap of 10 000 calls a day, and
+  24 h of cached results.
+
+### What each model gets
+
+| Model | Gets |
+|---|---|
+| Main, scan verdicts | per address, 24 h: requests, refused, not found, server errors, POSTs, bytes, active hours, unknown host names, backend 401/403, number of sites, exploit tags, nginx outcomes (public, denied, blocked, trap …), up to 20 paths with counts, 3 user agents |
+| Main, behaviour | per finding: the pattern and its evidence, requests, refused, not found, distinct not-found paths, backend 401/403, POSTs, bytes, active hours, busiest hour, machine-regular hours, networks, sites, refusals on other sites, authorised or not, up to 25 paths, 3 user agents |
+| Main, honeypot mining | refused paths of today and yesterday, one item per host and path (up to 300, most refused first): requests, refused, backend answers by status, distinct clients. Paths that already match a trap (rejected ones included) are left out. |
+| Verifier | the same evidence as the main model, without its verdict; for honeypots the proposals and the evidence of their paths only |
+| Injection check | the attacker-written strings only, one per item |
+
+Every free-text field passes the injection check first. Hosts, addresses, certificates
+and users are pseudonymised; the mapping stays on the box.
 
 The model prompts also get these changes:
 - Untrusted text goes into a separate, clearly marked field, with control characters
@@ -298,5 +318,4 @@ Reconsider it if the honeypots catch too little, for example on new boxes.
 
 ## Open questions
 
-1. "jev": which model or product is meant? Any classifier with a Hugging Face-style
-   endpoint, or any OpenAI-compatible chat model, fits the built check.
+None. "jev" is the type-safe model of §2.

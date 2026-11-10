@@ -206,6 +206,16 @@ final class Traps
         return $st;
     }
 
+    /** The mining items a proposal is about (the verifier needs these, not all 300). */
+    private static function evidenceFor(array $props, array $items): array
+    {
+        return array_values(array_filter($items, function ($it) use ($props) {
+            $p = (string)($it['untrusted']['path'][0] ?? '');
+            foreach ($props as $x) if ($x['kind'] === 'exact' ? $p === $x['path'] : str_starts_with($p, $x['path'])) return true;
+            return false;
+        }));
+    }
+
     /** Distinct attacking addresses over 30 days (trap hits included), and the last day one was seen. */
     private static function attackers(string $host, string $kind, string $path): array
     {
@@ -224,14 +234,36 @@ final class Traps
     /** Ask the AI for trap patterns in the refused paths of the last 24 h; one vote per pattern and 3-hour window. */
     private static function mine(): int
     {
-        $rows = DB::all("SELECT host, path, data FROM attack_paths WHERE day >= current_date - 1 ORDER BY (data->>'refused')::int DESC NULLS LAST LIMIT 300");
+        $rows = DB::all("SELECT host, path, data FROM attack_paths WHERE day >= current_date - 1 ORDER BY (data->>'refused')::int DESC NULLS LAST LIMIT 2000");
         if (!$rows) return 0;
+        // paths that already match a trap (any state, rejected included) are not new material
+        $known = DB::all("SELECT host, kind, path FROM traps WHERE state IN ('proposed', 'shadow', 'active', 'rejected', 'disabled')");
+        $isKnown = function (string $host, string $path) use ($known): bool {
+            foreach ($known as $t) {
+                if ($t['host'] !== '*' && $t['host'] !== $host) continue;
+                if ($t['kind'] === 'exact' ? $path === $t['path'] : str_starts_with($path, $t['path'])) return true;
+            }
+            return false;
+        };
+        // one item per host and path over today and yesterday
+        $agg = [];
+        foreach ($rows as $r) {
+            if ($isKnown($r['host'], $r['path'])) continue;
+            $d = json_dec($r['data']);
+            $a = &$agg[$r['host'] . "\0" . $r['path']];
+            $a ??= ['host' => $r['host'], 'path' => $r['path'], 'total' => 0, 'refused' => 0, 'ust' => [], 'ips' => []];
+            $a['total'] += (int)($d['total'] ?? 0); $a['refused'] += (int)($d['refused'] ?? 0);
+            foreach ((array)($d['ust'] ?? []) as $code => $n) $a['ust'][(string)$code] = ($a['ust'][(string)$code] ?? 0) + (int)$n;
+            foreach (array_keys((array)($d['ips'] ?? [])) as $ip) $a['ips'][$ip] = true;
+            unset($a);
+        }
+        if (!$agg) return 0;
+        uasort($agg, fn($x, $y) => $y['refused'] <=> $x['refused']);
         $ps = AI::pseudonymiser();
         $items = [];
-        foreach ($rows as $r) {
-            $d = json_dec($r['data']);
-            $items[] = ['host' => $ps->of('host', $r['host']), 'path' => [AI::scrubPath($r['path'])], 'requests' => $d['total'] ?? 0,
-                'refused' => $d['refused'] ?? 0, 'backend_answers' => $d['ust'] ?? new stdClass(), 'clients' => count($d['ips'] ?? [])];
+        foreach (array_slice($agg, 0, 300) as $a) {
+            $items[] = ['host' => $ps->of('host', $a['host']), 'path' => [AI::scrubPath($a['path'])], 'requests' => $a['total'],
+                'refused' => $a['refused'], 'backend_answers' => $a['ust'] ?: new stdClass(), 'clients' => count($a['ips'])];
         }
         [$items] = AI::shield($items, ['path' => 200]);   // injection check; without one only path-shaped strings
         $items = array_values(array_filter($items, fn($x) => ($x['untrusted']['path'] ?? []) !== [] && $x['untrusted']['path'][0] !== AI::REMOVED));
@@ -263,7 +295,8 @@ final class Traps
             try {
                 if (!AI::available('verify')) throw new RuntimeException('verification model not available');
                 [$vans, $verifyCall] = AI::call('verify', 'verify', $vsys, ['proposals' => array_map(fn($k, $x) => ['p' => $k, 'host' => $x['host'] === '*' ? '*' : $ps->of('host', $x['host']),
-                    'kind' => $x['kind'], 'path' => $x['path'], 'reason' => AI::untrusted($x['reason'], 200)], array_keys($props), $props), 'evidence' => $items], $ps, 'decisions');
+                    'kind' => $x['kind'], 'path' => $x['path'], 'reason' => AI::untrusted($x['reason'], 200)], array_keys($props), $props),
+                    'evidence' => self::evidenceFor($props, $items)], $ps, 'decisions');
                 foreach ((array)($vans['decisions'] ?? []) as $d) if (is_array($d) && ($d['decision'] ?? '') === 'confirm' && isset($props[$d['p'] ?? ''])) $ok[$d['p']] = true;
             } catch (Throwable) {
                 // no answer from the verifier: no votes in this window (the AI log has the error)

@@ -38,7 +38,10 @@ final class AI
     public const VERIFY_NOTE = ' You are an independent, cautious reviewer: a block shuts out real users, so decide for a block only when the evidence clearly shows an attack.';
     /** The injection check: a classifier API ({"inputs": [...]}, Hugging Face style) or a chat model with a typed answer. */
     public const CHECK_DEFAULTS = ['type' => 'classifier', 'model' => '', 'base_url' => '', 'key_enc' => '', 'same_as_main' => false,
-        'daily_cap' => 2000, 'threshold' => 0.5];
+        'daily_cap' => 10000, 'threshold' => 0.5];
+    public const CHECK_BATCH = 100;   // strings per check call (results are cached for 24 h, so most repeat for free)
+    /** Noted in prompts sent while the check is unavailable; the AI log counts them. */
+    public const CHECK_UNAVAILABLE = 'injection check unavailable: only path-shaped paths and user-agent product names';
     public const REMOVED = '[removed: injection attempt]';
 
     /** The decision settings and the main model (Settings → Runtime → AI). */
@@ -276,7 +279,7 @@ final class AI
             if ($row) $out[$t] = ['label' => $row['label'], 'score' => (float)$row['score']];
             else $todo[] = $t;
         }
-        foreach (array_chunk($todo, 50) as $chunk) {
+        foreach (array_chunk($todo, self::CHECK_BATCH) as $chunk) {
             if (self::callsToday('check') >= $m['daily_cap'] || self::paused('check')) return null;
             try { $res = $m['type'] === 'chat' ? self::checkChat($m, $chunk) : self::checkClassifier($m, $chunk); }
             catch (Throwable) { return null; }   // the AI log has the error
@@ -317,7 +320,10 @@ final class AI
                 foreach ($vals as $v) {
                     $t = $norm($v, $max);
                     if ($res === null) {
-                        if (!preg_match('#^/[a-z0-9._~/-]{0,99}$#i', $t)) { $withheld++; continue; }
+                        // no check: only what cannot carry a sentence (a path, a product name)
+                        $safe = $k === 'user_agents' ? self::productName($t) : (self::pathShaped($t) ? $t : null);
+                        if ($safe === null) { $withheld++; continue; }
+                        $t = $safe;
                     } elseif (($res[$t]['label'] ?? 'injection') === 'injection') {
                         $hit = true; $found[] = $t; $t = self::REMOVED;
                     }
@@ -325,11 +331,29 @@ final class AI
                 }
             }
             $it['untrusted'] = $u;
+            if ($res === null && $u) $it['untrusted_note'] = self::CHECK_UNAVAILABLE;
             if ($withheld) $it['withheld'] = "$withheld strings left out: no injection check";
             if ($hit) $it['injection_attempted'] = true;
         }
         unset($it);
         return [$items, array_values(array_unique($found)), $res !== null];
+    }
+
+    /**
+     * A path that cannot carry a sentence: letters, digits, . _ ~ / -, the placeholders of
+     * scrubPath ({n}, {user} …, a trailing ?…), no spaces or %-encoding, at most 100 characters.
+     */
+    public static function pathShaped(string $t): bool
+    {
+        $x = preg_replace('/\{(n|hex|user|name|email|token)\}/', 'x', $t) ?? $t;
+        $x = preg_replace('/\?…$/u', '', $x) ?? $x;
+        return strlen($t) <= 100 && (bool)preg_match('#^/[a-z0-9._~/-]{0,99}$#i', $x);
+    }
+
+    /** The product name of a user agent, e.g. "sqlmap/1.7" or "Mozilla/5.0": one token, no spaces; null if there is none. */
+    public static function productName(string $ua): ?string
+    {
+        return preg_match('#^[A-Za-z][A-Za-z0-9._-]{0,39}(/[A-Za-z0-9._-]{1,20})?#', $ua, $m) ? $m[0] : null;   // from the start, clean part only
     }
 
     /** Added to every prompt that carries attacker-written text. */

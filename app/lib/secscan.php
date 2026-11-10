@@ -262,11 +262,14 @@ final class SecScan
         $rows = DB::all("SELECT ip::text AS ip, jsonb_agg(data) AS d FROM ip_activity WHERE hour > now() - interval '24 hours' GROUP BY ip");
         $cands = [];
         foreach ($rows as $r) {
-            $sum = ['req' => 0, 'denied' => 0, 's404' => 0, 'unknown' => 0, 'tags' => [], 'paths' => [], 'uas' => [], 'ust401' => 0, 'sites' => []];
-            foreach (json_dec($r['d']) as $h) foreach ($sum as $k => $_) {
+            $sum = ['req' => 0, 'denied' => 0, 's404' => 0, 's5xx' => 0, 'unknown' => 0, 'posts' => 0, 'bytes' => 0, 'ust401' => 0,
+                'tags' => [], 'paths' => [], 'uas' => [], 'sites' => [], 'out' => []];
+            $hours = json_dec($r['d']);
+            foreach ($hours as $h) foreach ($sum as $k => $_) {
                 if (is_array($_)) foreach ((array)($h[$k] ?? []) as $x => $n) $sum[$k][$x] = ($sum[$k][$x] ?? 0) + (is_int($n) ? $n : 1);
                 else $sum[$k] += (int)($h[$k] ?? 0);
             }
+            $sum['active_hours'] = count($hours);
             $ip = explode('/', $r['ip'])[0];
             if (IP::neverBlocked($r['ip'])) continue;
             if (!($sum['denied'] >= 10 || $sum['s404'] >= 20 || $sum['unknown'] >= 3 || $sum['tags'])) continue;
@@ -288,8 +291,14 @@ final class SecScan
                 $subjects = [];
                 foreach ($batch as $cidr => $s) {
                     arsort($s['paths']);
+                    $outcomes = [];
+                    foreach ($s['out'] as $o => $n) { $o = preg_replace('/^(trap(-shadow)?):\d+$/', '$1', (string)$o) ?? (string)$o; $outcomes[$o] = ($outcomes[$o] ?? 0) + $n; }
+                    arsort($outcomes);
                     $subjects[] = ['subject' => $ps->of('ip', $cidr), 'requests' => $s['req'], 'denied' => $s['denied'], 'not_found' => $s['s404'],
+                        'server_errors' => $s['s5xx'], 'posts' => $s['posts'], 'bytes_sent' => $s['bytes'], 'active_hours' => $s['active_hours'],
                         'unknown_host_names' => $s['unknown'], 'backend_401_403' => $s['ust401'], 'sites' => count($s['sites']), 'exploit_tags' => $s['tags'],
+                        // how nginx answered (counts per outcome: public, denied, blocked, lan, cert, trap:…, unknown-…)
+                        'outcomes' => array_slice($outcomes, 0, 8, true),
                         'paths' => array_map(fn($p, $n) => [AI::scrubPath((string)$p), $n], array_slice(array_keys($s['paths']), 0, 20), array_slice(array_values($s['paths']), 0, 20)),
                         'user_agents' => array_slice(array_keys($s['uas']), 0, 3)];
                 }

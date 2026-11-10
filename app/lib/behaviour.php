@@ -199,6 +199,9 @@ final class Behaviour
                     'pattern' => $c['pattern'], 'deterministic_risk' => $c['risk'], 'evidence' => $c['evidence'],
                     'requests_24h' => $feat['req'] ?? 0, 'denied' => $feat['denied'] ?? 0, 'not_found' => $feat['s404'] ?? 0,
                     'backend_401_403' => $feat['ust401'] ?? 0, 'networks' => count($feat['ips'] ?? []), 'sites' => count($feat['sites'] ?? []),
+                    'posts' => $feat['posts'] ?? 0, 'bytes' => $feat['bytes'] ?? 0, 'active_hours' => count($feat['hours'] ?? []),
+                    'max_requests_per_hour' => $feat['max_hour_req'] ?? 0, 'machine_regular_hours' => $feat['regular'] ?? 0,
+                    'distinct_not_found' => count($feat['p404'] ?? []), 'denied_on_other_sites' => array_sum($feat['dsites'] ?? []),
                     'paths' => array_map([AI::class, 'scrubPath'], array_slice(array_keys($feat['paths'] ?? []), 0, 25)),
                     'user_agents' => array_slice(array_keys($feat['uas'] ?? []), 0, 3)];
             }

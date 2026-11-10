@@ -282,11 +282,13 @@ if ($tab === 'overview'):
     $pretty = fn($x) => h(json_encode($x, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)); ?>
     <p class="small">Every call to an AI model, with the data as it was sent (pseudonymised), the answer, and what PSPM did with it.
       Full requests and answers are kept for 30 days. Pseudonyms are resolved here only: the mapping never leaves the box.</p>
-    <?php $injections = (int)DB::val("SELECT count(*) FROM ai_check_cache WHERE label = 'injection' AND at > now() - interval '24 hours'"); ?>
+    <?php $injections = (int)DB::val("SELECT count(*) FROM ai_check_cache WHERE label = 'injection' AND at > now() - interval '24 hours'");
+          $unchecked = (int)DB::val("SELECT count(*) FROM ai_calls WHERE role <> 'check' AND at > now() - interval '24 hours' AND request::text LIKE ?", ['%' . AI::CHECK_UNAVAILABLE . '%']); ?>
     <table class="table table-sm small mb-3"><thead><tr><th>Model (24 h)</th><th>Calls / cap</th><th>Errors</th><th>Tokens in / out</th><th>Cost</th><th>Average duration</th></tr></thead><tbody>
     <?php foreach (AI::ROLES as $role => $label): $f = $fig[$role] ?? null; $mm = AI::model($role); ?>
       <tr><td><?= h($label) ?> <span class="text-muted"><?= h($mm['model'] ?: 'not set') ?></span>
-        <?= $role === 'check' ? '<div>injection attempts found: ' . ($injections ? badge('amber', (string)$injections) : '0') . '</div>' : '' ?>
+        <?= $role === 'check' ? '<div>injection attempts found: ' . ($injections ? badge('amber', (string)$injections) : '0') . '</div>'
+            . '<div>prompts sent without the check: ' . ($unchecked ? badge('amber', (string)$unchecked) . ' (they carried only paths and product names)' : '0') . '</div>' : '' ?>
         <?php if ($pz = AI::paused($role)): ?><div><?= badge('amber', 'paused') ?> until <?= h(fmt_time($pz['until'], 'H:i')) ?> after HTTP <?= h($pz['status']) ?> (<?= h($pz['minutes']) ?> min)</div><?php endif; ?></td>
         <td><?= h($f['calls'] ?? 0) ?> / <?= h($mm['daily_cap']) ?></td><td><?= ($f['errors'] ?? 0) ? badge('red', (string)$f['errors']) : '0' ?></td>
         <td><?= h(number_format((int)($f['tin'] ?? 0))) ?> / <?= h(number_format((int)($f['tout'] ?? 0))) ?></td>

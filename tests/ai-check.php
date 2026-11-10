@@ -44,8 +44,10 @@ check($c['status'] == 200 && $c['tokens_in'] > 0 && (float)$c['cost'] > 0 && $c[
 check(in_array('198.51.201.1/32', $ps, true) && !str_contains($c['request'], '198.51.201.1'), 'pseudonyms: kept on the box, never in the request');
 check(Blocks::isBlocked('198.51.201.1/32') && DB::val("SELECT call_id FROM ai_verdicts WHERE subject = '198.51.201.1/32'") == $c['id'], 'an exploit scanner is blocked; its verdict names the call');
 check(DB::val("SELECT outcome FROM ai_verdicts WHERE subject = '198.51.201.2/32'") === 'no answer', 'an address the model left out is recorded as "no answer"');
-check(!str_contains($c['request'], 'ignore all previous') && str_contains($c['request'], 'no injection check') && str_contains($c['request'], '/.git/config'),
-    'no injection check: user agents are left out, path-shaped paths are sent');
+check(!str_contains($c['request'], 'ignore all previous') && str_contains($c['request'], AI::CHECK_UNAVAILABLE) && str_contains($c['request'], '/.git/config')
+    && str_contains($c['request'], '"Mozilla/5.0"'), 'no injection check: user agents become product names, path-shaped paths are sent');
+$sent = json_dec($c['request'])['user']['subjects'][0] ?? [];
+check(isset($sent['outcomes'], $sent['posts'], $sent['server_errors'], $sent['active_hours'], $sent['bytes_sent']), 'the model gets the counts the scan collects (outcomes, POSTs, server errors, hours, bytes)');
 check(Blocks::isBlocked('198.51.201.3/32'), 'so the injected user agent never reaches the model (fail closed): blocked for its exploit path');
 
 // behaviour: findings assessed in one batch, attack blocked
@@ -121,8 +123,8 @@ check($r['/b1']['label'] === 'injection' && !empty($r['/b1']['invalid']), 'an an
 $setCheck(['base_url' => 'http://127.0.0.1:8098/classify', 'model' => 'fake-down']);
 check(AI::screen(['/c1']) === null, 'a check that cannot be reached gives no answer');
 [$items, , $ran] = AI::shield([['paths' => [['/ok/path.php', 3], ['/a%20b', 1]], 'user_agents' => ['curl/8']]], ['paths' => 200, 'user_agents' => 120]);
-check(!$ran && $items[0]['untrusted']['paths'] === [['/ok/path.php', 3]] && $items[0]['untrusted']['user_agents'] === [] && isset($items[0]['withheld']),
-    'then only path-shaped paths are sent; encoded text and user agents are left out');
+check(!$ran && $items[0]['untrusted']['paths'] === [['/ok/path.php', 3]] && $items[0]['untrusted']['user_agents'] === ['curl/8'] && isset($items[0]['withheld']),
+    'then only path-shaped paths and product names are sent; encoded text is left out');
 
 Settings::set('ai_check', AI::CHECK_DEFAULTS);
 
@@ -181,6 +183,13 @@ DB::q("DELETE FROM trap_votes"); DB::q("DELETE FROM scan_state WHERE key = 'last
 $setVerify('fake-verify');
 Traps::maintain(true);
 check((int)DB::val("SELECT votes FROM traps WHERE path = '/wp-login.php' AND created_by = 'ai'") >= 1, 'honeypots: confirmed proposals get their vote');
+$mc = json_dec((string)DB::val("SELECT request FROM ai_calls WHERE purpose = 'honeypots' ORDER BY id DESC LIMIT 1"));
+$mpaths = array_map(fn($x) => $x['untrusted']['path'][0] ?? '', $mc['user']['paths'] ?? []);
+$keys = array_map(fn($x) => $x['host'] . ' ' . ($x['untrusted']['path'][0] ?? ''), $mc['user']['paths'] ?? []);
+check(!in_array('/.env', $mpaths, true) && count($keys) === count(array_unique($keys)), 'mining: each host and path once; paths that already match a trap are left out');
+$vc = json_dec((string)DB::val("SELECT request FROM ai_calls WHERE purpose = 'verify' AND request::text LIKE '%proposals%' ORDER BY id DESC LIMIT 1"));
+$ev = array_map(fn($x) => $x['untrusted']['path'][0] ?? '', $vc['user']['evidence'] ?? []);
+check($ev && !array_diff($ev, array_column($vc['user']['proposals'], 'path')), 'mining: the verifier gets the evidence for the proposed paths only');
 Settings::set('ai_verify', AI::VERIFY_DEFAULTS);
 
 // ---- hardening (docs/security-ai-improvements.md §6)
