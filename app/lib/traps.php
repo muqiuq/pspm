@@ -8,7 +8,8 @@ declare(strict_types=1);
  */
 final class Traps
 {
-    public const MAX_ACTIVE = 500;
+    public const MAX_ACTIVE = 300;         // only the 300 best are active (docs/security-ai-improvements.md §1)
+    public const SWAP_MARGIN = 1.2;        // a waiting trap replaces an active one only with a 20 % higher score
     public const BREAKER_PER_HOUR = 200;
     public const MIN_PREFIX = 5;
     public const TRACKS = ['fast' => ['votes' => 1, 'attackers' => 2, 'shadow_secs' => 3600],
@@ -56,27 +57,109 @@ final class Traps
         return (int)$id;
     }
 
+    /**
+     * An admin's decision. Activating makes the trap eligible (the daily ranking can still let a
+     * better one take its place unless it is pinned); moving it to shadow makes it earn its
+     * shadow period again, so the ranking does not bring it straight back.
+     */
     public static function setState(int $id, string $state): void
     {
         if ($state === 'active') {
             $t = DB::one('SELECT * FROM traps WHERE id = ?', [$id]);
             if (!$t || $t['state'] === 'rejected') throw new InvalidArgumentException('A rejected trap cannot be activated: a backend serves this path.');
-            if ((int)DB::val("SELECT count(*) FROM traps WHERE state = 'active'") >= self::MAX_ACTIVE) throw new InvalidArgumentException('At most ' . self::MAX_ACTIVE . ' active traps.');
+            if ((int)DB::val("SELECT count(*) FROM traps WHERE state = 'active'") >= self::MAX_ACTIVE) {
+                throw new InvalidArgumentException(self::MAX_ACTIVE . ' traps are active already (the best by score). Disable one first, or wait for the daily ranking.');
+            }
         }
-        DB::q('UPDATE traps SET state = ?, shadow_since = CASE WHEN ? = \'shadow\' THEN now() ELSE shadow_since END, updated_at = now() WHERE id = ?', [$state, $state, $id]);
+        DB::q("UPDATE traps SET state = ?, shadow_since = CASE WHEN ? = 'shadow' THEN now() ELSE shadow_since END,
+                 eligible_at = CASE WHEN ? = 'active' THEN coalesce(eligible_at, now()) WHEN ? = 'shadow' THEN NULL ELSE eligible_at END,
+                 updated_at = now() WHERE id = ?", [$state, $state, $state, $state, $id]);
         Audit::log('trap.' . $state, "trap:$id");
+        self::rank(false);
         State::publish('traps');
+    }
+
+    /** Pin or unpin: pinned traps are always active and count towards the 300. */
+    public static function pin(int $id): bool
+    {
+        $pinned = (bool)DB::val('SELECT pinned FROM traps WHERE id = ?', [$id]);
+        if (!$pinned && (int)DB::val('SELECT count(*) FROM traps WHERE pinned') >= self::MAX_ACTIVE) {
+            throw new InvalidArgumentException('At most ' . self::MAX_ACTIVE . ' pinned traps.');
+        }
+        DB::q("UPDATE traps SET pinned = NOT pinned, eligible_at = coalesce(eligible_at, now()), updated_at = now() WHERE id = ? AND state NOT IN ('rejected', 'disabled', 'retired')", [$id]);
+        Audit::log($pinned ? 'trap.unpin' : 'trap.pin', "trap:$id");
+        self::rank(false);
+        State::publish('traps');
+        return !$pinned;
+    }
+
+    /** Score over 30 days: distinct attackers × 1.5 on the fast track × 1.2 for scope "*" × recency. */
+    public static function score(string $track, string $host, int $attackers, int $lastSeen): float
+    {
+        $age = time() - $lastSeen;
+        $recency = $lastSeen <= 0 ? 0.2 : ($age <= 7 * 86400 ? 1.0 : ($age <= 30 * 86400 ? 0.5 : 0.2));
+        return round($attackers * ($track === 'fast' ? 1.5 : 1.0) * ($host === '*' ? 1.2 : 1.0) * $recency, 3);
+    }
+
+    /**
+     * Only the 300 best are active. Pinned traps always are and count towards the 300. Free
+     * places are filled every round with the best eligible traps; with $swap (once a day and
+     * after mining) a waiting trap takes the place of the worst active one when its score is
+     * at least 20 % higher, so traps do not flap. Writes each trap's rank.
+     * @return array{activated: int, deactivated: int}
+     */
+    public static function rank(bool $swap, bool $activate = true): array
+    {
+        $r = ['activated' => 0, 'deactivated' => 0];
+        $pinned = $active = $waiting = [];
+        foreach (DB::all("SELECT id, state, pinned, score, eligible_at FROM traps WHERE state IN ('active', 'shadow')") as $t) {
+            $t['score'] = (float)$t['score'];
+            if ($t['pinned']) $pinned[] = $t;
+            elseif ($t['state'] === 'active') $active[] = $t;
+            elseif ($t['eligible_at'] !== null) $waiting[] = $t;
+        }
+        $desc = fn($a, $b) => [$b['score'], $a['id']] <=> [$a['score'], $b['id']];
+        usort($active, $desc);
+        usort($waiting, $desc);
+        $set = function (array $t, string $state) use (&$r) {
+            DB::q('UPDATE traps SET state = ?, updated_at = now() WHERE id = ?', [$state, $t['id']]);
+            $r[$state === 'active' ? 'activated' : 'deactivated']++;
+        };
+        foreach ($pinned as $t) if ($t['state'] !== 'active') $set($t, 'active');   // pinned: always active
+        $slots = max(0, self::MAX_ACTIVE - count($pinned));
+        while (count($active) > $slots) { $t = array_pop($active); $set($t, 'shadow'); $waiting[] = $t; }   // fewer places than active traps
+        usort($waiting, $desc);
+        if ($activate) {
+            while (count($active) < $slots && $waiting) { $t = array_shift($waiting); $set($t, 'active'); $active[] = $t; }
+            while ($swap && $active && $waiting) {
+                $worst = $active[count($active) - 1];
+                $best = $waiting[0];
+                if (!($best['score'] > $worst['score'] && $best['score'] >= self::SWAP_MARGIN * $worst['score'])) break;
+                array_pop($active); array_shift($waiting);
+                $set($worst, 'shadow'); $set($best, 'active');
+                $active[] = $best; $waiting[] = $worst;
+                usort($active, $desc); usort($waiting, $desc);
+            }
+        }
+        // ranks: pinned first, then every active and waiting trap by score
+        usort($pinned, $desc);
+        $all = array_merge($pinned, (function () use ($active, $waiting, $desc) { $x = array_merge($active, $waiting); usort($x, $desc); return $x; })());
+        $ids = array_map(fn($t) => (int)$t['id'], $all);
+        DB::q('UPDATE traps SET rank = NULL WHERE rank IS NOT NULL AND NOT (id = ANY (CAST(? AS bigint[])))', ['{' . implode(',', $ids) . '}']);
+        if ($ids) DB::q('UPDATE traps t SET rank = v.r FROM unnest(CAST(? AS bigint[]), CAST(? AS int[])) AS v(id, r) WHERE t.id = v.id AND t.rank IS DISTINCT FROM v.r',
+            ['{' . implode(',', $ids) . '}', '{' . implode(',', range(1, count($ids))) . '}']);
+        return $r;
     }
 
     /** Lifecycle, safety and mining; run by the full scan round. */
     public static function maintain(bool $runNow = false): array
     {
-        $st = ['activated' => 0, 'disabled' => 0, 'retired' => 0, 'mined' => 0];
+        $st = ['activated' => 0, 'deactivated' => 0, 'disabled' => 0, 'retired' => 0, 'mined' => 0];
         if (!self::enabled()) return $st + ['enabled' => false];
-        // breaker: too many trap blocks in an hour puts every trap back into shadow
+        // breaker: too many trap blocks in an hour puts every trap back into shadow (they earn their place again)
         $hour = (int)DB::val("SELECT count(*) FROM block_history WHERE source = 'trap' AND created_at > now() - interval '1 hour'");
         if ($hour >= self::BREAKER_PER_HOUR) {
-            DB::q("UPDATE traps SET state = 'shadow', shadow_since = now() WHERE state = 'active' AND NOT pinned");
+            DB::q("UPDATE traps SET state = 'shadow', shadow_since = now(), eligible_at = NULL WHERE state = 'active' AND NOT pinned");
             Notify::event('health', 'Honeypot breaker: all traps back in shadow', "$hour trap blocks within an hour. Every trap is now only observed. Check the traps on the Security page.", 'trap-breaker');
             Audit::log('trap.breaker', null, ['blocks_last_hour' => $hour]);
         }
@@ -88,14 +171,14 @@ final class Traps
                 continue;
             }
             $tr = self::TRACKS[$ev];
-            $attackers = self::attackers($t['host'], $t['kind'], $t['path']);
-            DB::q('UPDATE traps SET track = ?, attackers = ? WHERE id = ?', [$ev, $attackers, $t['id']]);
+            [$attackers, $lastDay] = self::attackers($t['host'], $t['kind'], $t['path']);
+            $lastSeen = max((int)strtotime((string)($t['last_hit_at'] ?? '')), $lastDay ? (int)strtotime("$lastDay 23:59:59 UTC") : 0);
+            DB::q('UPDATE traps SET track = ?, attackers = ?, score = ? WHERE id = ?', [$ev, $attackers, self::score($ev, $t['host'], $attackers, $lastSeen), $t['id']]);
             if ($t['state'] === 'proposed' && (int)$t['votes'] >= $tr['votes'] && $attackers >= $tr['attackers']) {
                 DB::q("UPDATE traps SET state = 'shadow', shadow_since = now(), updated_at = now() WHERE id = ?", [$t['id']]);
-            } elseif ($t['state'] === 'shadow' && $t['shadow_since'] && time() - strtotime($t['shadow_since']) >= $tr['shadow_secs']
-                && (int)DB::val("SELECT count(*) FROM traps WHERE state = 'active'") < self::MAX_ACTIVE && $hour < self::BREAKER_PER_HOUR) {
-                DB::q("UPDATE traps SET state = 'active', updated_at = now() WHERE id = ?", [$t['id']]);
-                $st['activated']++;
+            } elseif ($t['state'] === 'shadow' && $t['eligible_at'] === null && $t['shadow_since'] && time() - strtotime($t['shadow_since']) >= $tr['shadow_secs']
+                && $hour < self::BREAKER_PER_HOUR) {
+                DB::q('UPDATE traps SET eligible_at = now() WHERE id = ?', [$t['id']]);   // the ranking decides whether it is active
             } elseif ($t['state'] === 'active' && !$t['pinned'] && strtotime($t['last_hit_at'] ?? $t['updated_at']) < time() - 90 * 86400) {
                 DB::q("UPDATE traps SET state = 'retired', updated_at = now() WHERE id = ?", [$t['id']]);
                 $st['retired']++;
@@ -107,23 +190,35 @@ final class Traps
         }
         $last = SecScan::state('last_mining');
         $refused = (int)DB::val("SELECT count(*) FROM attack_paths WHERE day >= current_date - 1");
+        $mined = false;
         if (($runNow || !$last || time() - strtotime($last['at']) >= 3 * 3600) && $refused > 0 && AI::available()) {
             $st['mined'] = self::mine();
             SecScan::setState('last_mining', ['at' => gmdate('c')]);
+            $mined = true;
         }
+        // the 300 best: free places every round; swaps once a day and after mining
+        $lastRank = SecScan::state('last_trap_ranking');
+        $daily = $runNow || $mined || !$lastRank || time() - strtotime($lastRank['at']) >= 86400;
+        $r = self::rank($daily, $hour < self::BREAKER_PER_HOUR);
+        if ($daily) SecScan::setState('last_trap_ranking', ['at' => gmdate('c')]);
+        $st['activated'] += $r['activated'];
+        $st['deactivated'] += $r['deactivated'];
         return $st;
     }
 
-    private static function attackers(string $host, string $kind, string $path): int
+    /** Distinct attacking addresses over 30 days (trap hits included), and the last day one was seen. */
+    private static function attackers(string $host, string $kind, string $path): array
     {
         $where = $kind === 'exact' ? 'path = ?' : 'path LIKE ?';
         $arg = $kind === 'exact' ? $path : str_replace(['%', '_'], ['\%', '\_'], $path) . '%';
         $ips = [];
-        foreach (DB::all("SELECT data FROM attack_paths WHERE $where" . ($host === '*' ? '' : ' AND host = ?') . " AND day > now() - interval '30 days'",
+        $last = null;
+        foreach (DB::all("SELECT day::text AS day, data FROM attack_paths WHERE $where" . ($host === '*' ? '' : ' AND host = ?') . " AND day > now() - interval '30 days'",
             $host === '*' ? [$arg] : [$arg, $host]) as $r) {
             foreach (array_keys(json_dec($r['data'])['ips'] ?? []) as $ip) $ips[$ip] = true;
+            if ($last === null || $r['day'] > $last) $last = $r['day'];
         }
-        return count($ips);
+        return [count($ips), $last];
     }
 
     /** Ask the AI for trap patterns in the refused paths of the last 24 h; one vote per pattern and 3-hour window. */

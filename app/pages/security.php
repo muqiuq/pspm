@@ -47,8 +47,7 @@ if (is_post()) {
                 flash('Trap updated.');
                 break;
             case 'trap_pin':
-                DB::q('UPDATE traps SET pinned = NOT pinned WHERE id = ?', [(int)post('id')]);
-                flash('Trap updated.');
+                flash(Traps::pin((int)post('id')) ? 'Pinned: always active, counts towards the ' . Traps::MAX_ACTIVE . '.' : 'Unpinned: the ranking decides whether it stays active.');
                 break;
             case 'trap_delete':
                 DB::q('DELETE FROM traps WHERE id = ?', [(int)post('id')]);
@@ -175,18 +174,34 @@ if ($tab === 'overview'):
     <?php endforeach; ?>
     <?php if (!$findings): ?><tr><td colspan="7" class="text-muted">No findings.</td></tr><?php endif; ?></tbody></table>
 <?php elseif ($tab === 'traps'):
-    $traps = DB::all("SELECT * FROM traps ORDER BY CASE state WHEN 'active' THEN 0 WHEN 'shadow' THEN 1 WHEN 'proposed' THEN 2 ELSE 3 END, hits DESC, id LIMIT 600"); ?>
+    $traps = DB::all("SELECT * FROM traps ORDER BY CASE state WHEN 'active' THEN 0 WHEN 'shadow' THEN 1 WHEN 'proposed' THEN 2 ELSE 3 END, rank NULLS LAST, score DESC, id LIMIT 600");
+    $nActive = (int)DB::val("SELECT count(*) FROM traps WHERE state = 'active'");
+    $lastRank = SecScan::state('last_trap_ranking');
+    // why a trap is where it is (docs/security-ai-improvements.md §1)
+    $why = function (array $t) use ($nActive): string {
+        if ($t['state'] === 'active') return $t['pinned'] ? 'pinned: always active' : 'rank ' . $t['rank'] . ' of ' . Traps::MAX_ACTIVE;
+        if ($t['state'] === 'shadow' && $t['eligible_at'] !== null) return 'waiting, rank ' . $t['rank'] . ': the ' . Traps::MAX_ACTIVE . ' places are taken by better ones';
+        if ($t['state'] === 'shadow') return 'observed; eligible ' . ago(gmdate('c', strtotime((string)$t['shadow_since']) + Traps::TRACKS[$t['track']]['shadow_secs']));
+        if ($t['state'] === 'proposed') return 'needs ' . Traps::TRACKS[$t['track']]['votes'] . ' votes and ' . Traps::TRACKS[$t['track']]['attackers'] . ' attackers';
+        if ($t['state'] === 'rejected') return 'a backend serves this path';
+        return '';
+    }; ?>
     <p class="small text-muted">Paths only attackers ask for. The first request to an <em>active</em> trap from an untrusted address blocks it. <em>Shadow</em> traps are matched and logged only.
       A path that a backend serves is rejected and can never be activated.</p>
-    <table class="table table-sm small align-middle"><thead><tr><th>Host</th><th>Path</th><th>State</th><th>Track</th><th>Votes</th><th>Attackers</th><th>Hits</th><th>Note</th><th></th></tr></thead><tbody>
+    <p class="small">Only the <?= Traps::MAX_ACTIVE ?> best are active (<?= $nActive ?> now). Score: distinct attackers in 30 days, ×1.5 on the fast track, ×1.2 for all hosts (*),
+      × recency (1 within 7 days, 0.5 within 30, 0.2 older). Pinned traps are always active. A waiting trap replaces an active one when its score is 20 % higher;
+      ranked once a day and after each mining run<?= $lastRank ? ' (last: ' . h(fmt_time($lastRank['at'])) . ')' : '' ?>.</p>
+    <table class="table table-sm small align-middle"><thead><tr><th>Host</th><th>Path</th><th>State</th><th>Score</th><th>Track</th><th>Votes</th><th>Attackers</th><th>Hits</th><th>Note</th><th></th></tr></thead><tbody>
     <?php foreach ($traps as $t): ?>
       <tr><td><?= h($t['host']) ?></td><td><code><?= h($t['path']) ?></code><?= $t['kind'] === 'prefix' ? '…' : '' ?></td>
-        <td><?= badge(['active' => 'red', 'shadow' => 'amber', 'proposed' => 'info', 'rejected' => 'grey'][$t['state']] ?? 'grey', $t['state']) ?> <?= $t['pinned'] ? badge('info', 'pinned') : '' ?></td>
+        <td><?= badge(['active' => 'red', 'shadow' => 'amber', 'proposed' => 'info', 'rejected' => 'grey'][$t['state']] ?? 'grey', $t['state']) ?> <?= $t['pinned'] ? badge('info', 'pinned') : '' ?>
+          <div class="text-muted"><?= h($why($t)) ?></div></td>
+        <td><?= h(round((float)$t['score'], 1)) ?></td>
         <td><?= h($t['track']) ?></td><td><?= h($t['votes']) ?></td><td><?= h($t['attackers']) ?></td><td><?= h($t['hits']) ?></td><td><?= h($t['note']) ?></td>
         <td class="text-nowrap"><?php if ($canOp): foreach (['active' => 'Activate', 'shadow' => 'Shadow', 'disabled' => 'Disable'] as $s => $l) if ($t['state'] !== $s && $t['state'] !== 'rejected') echo post_button('/security?tab=traps', $l, ['action' => 'trap_state', 'id' => $t['id'], 'state' => $s]) . ' ';
             echo post_button('/security?tab=traps', $t['pinned'] ? 'Unpin' : 'Pin', ['action' => 'trap_pin', 'id' => $t['id']]) . ' ' . post_button('/security?tab=traps', 'Delete', ['action' => 'trap_delete', 'id' => $t['id']], 'btn-outline-danger btn-sm'); endif; ?></td></tr>
     <?php endforeach; ?>
-    <?php if (!$traps): ?><tr><td colspan="9" class="text-muted">No traps yet. With an AI model set, the scan proposes them from refused requests; you can also add them here.</td></tr><?php endif; ?></tbody></table>
+    <?php if (!$traps): ?><tr><td colspan="10" class="text-muted">No traps yet. With an AI model set, the scan proposes them from refused requests; you can also add them here.</td></tr><?php endif; ?></tbody></table>
     <?php if ($canOp): ?>
     <form method="post" class="row g-2 col-xl-9"><?= csrf_field() ?><input type="hidden" name="action" value="trap_add">
       <div class="col-md-3"><input class="form-control form-control-sm" name="host" placeholder="host name or *" value="*"></div>

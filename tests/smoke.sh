@@ -39,6 +39,8 @@ echo "--- security"
 php /src/tests/security-check.php
 echo "--- AI (fake API): log, verdicts, behaviour, errors"
 php /src/tests/ai-check.php
+echo "--- honeypots: the 300 best"
+php /src/tests/traps-check.php
 echo "--- access links (site and admin UI)"
 php /src/tests/access-check.php
 echo "--- export/import"
