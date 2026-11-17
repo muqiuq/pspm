@@ -84,12 +84,19 @@ $form['routes'][1]['ov_conditions'] = ['public'];
 // an application's own sign-in callbacks: the sign-in overridden alone (without access conditions)
 $form['routes'][2] = ['id' => 'r3', 'match' => 'exact', 'paths' => '/signin-oidc /signout-callback-oidc', 'action' => 'proxy', 'listeners' => ['all'],
     'status' => '404', 'redirect_code' => '302', 'ov_signin' => 'none'];
+// an application that runs at / under /site1/: the path without the prefix, only for a prefix route that proxies
+$form['routes'][3] = ['id' => 'r4', 'match' => 'exact', 'paths' => '/site1', 'action' => 'proxy', 'listeners' => ['all'], 'status' => '404', 'redirect_code' => '302', 'strip_prefix' => '1'];
+[$c, $b] = req('POST', '/sites/edit', $form);
+check($c === 200 && str_contains($b, 'Only a prefix route that proxies to a backend can pass the path without its prefix.'), 'without the prefix: refused for an exact route');
+$form['routes'][3]['match'] = 'prefix';
 [$c, , $loc] = req('POST', '/sites/edit', $form);
 check($c === 303, 'site saved');
 [, $b] = req('GET', '/sites');
 preg_match('#/sites/edit\?id=([0-9a-f-]{36})#', $b, $m);
 [, $b] = req('GET', '/sites/edit?id=' . ($m[1] ?? ''));
 check((bool)preg_match('#name="routes\[2\]\[ov_signin\]">.*?<option value="none" selected>#s', $b), 'a sign-in override without access conditions is kept');
+check(str_contains($b, 'name="routes[3][paths]" value="/site1/"') && str_contains($b, 'name="routes[3][strip_prefix]" value="1" checked>')
+    && substr_count($b, '[strip_prefix]" value="1" checked>') === 1, 'without the prefix: kept on its route only, the path with its trailing /');
 [$c, $b] = req('GET', '/changes');
 check($c === 200 && str_contains($b, 'Ready to apply'), 'changes offers Ready to apply');
 check(str_contains($b, 'sites/app.example.ch.conf'), 'the preview diff lists the new site file');

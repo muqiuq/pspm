@@ -30,4 +30,37 @@ php /src/tests/render-fixture.php "$own" own >/dev/null
 cp -r /src/nginx/static "$own/static"; cp -r /src/lua "$own/lua"
 ngt "$own"
 grep -A3 'location = /signin-oidc' "$own/sites/app.example.ch.conf"
+# without the prefix (plan §7.3): nginx -t, then a running nginx in front of an application at /
+strip=/tmp/release-strip
+rm -rf "$strip"; mkdir -p "$strip"
+php /src/tests/render-fixture.php "$strip" strip >/dev/null
+cp -r /src/nginx/static "$strip/static"; cp -r /src/lua "$strip/lua"
+ngt "$strip"
+php -S 127.0.0.1:8097 /src/tests/echo-backend.php >/tmp/echo-backend.log 2>&1 & echopid=$!
+nginx -p "$strip/" -c nginx.conf
+sleep 1
+fails=0
+ok() { echo "ok   $*"; }; bad() { echo "FAIL $*"; fails=$((fails + 1)); }
+pr() { curl -s --resolve printer.example.ch:80:127.0.0.1 "$@"; }
+get() { pr "http://printer.example.ch$1"; }
+hdr() { pr -o /dev/null -D - "http://printer.example.ch$1" | tr -d '\r' | grep -i "^$2:" | cut -d' ' -f2- || true; }
+j=$(get '/site1/page?x=1')
+jq -e '.uri == "/page?x=1" and .prefix == "/site1" and .host == "printer.example.ch"' <<<"$j" >/dev/null \
+    && ok "/site1/page?x=1 reaches the application as /page?x=1, with X-Forwarded-Prefix /site1 and the host name" || bad "/site1/page: $j"
+j=$(get '/site2/'); jq -e '.uri == "/" and .prefix == "/site2"' <<<"$j" >/dev/null && ok "/site2/ reaches it as /" || bad "/site2/: $j"
+j=$(get '/site1/a%20b'); jq -e '.uri == "/a%20b"' <<<"$j" >/dev/null && ok "an encoded path stays encoded" || bad "/site1/a%20b: $j"
+j=$(pr -H 'X-Forwarded-Prefix: /evil' 'http://printer.example.ch/site1/'); jq -e '.prefix == "/site1"' <<<"$j" >/dev/null && ok "a client cannot send its own X-Forwarded-Prefix there" || bad "client prefix: $j"
+l=$(hdr '/site1?q=2' location); [[ $l == "http://printer.example.ch/site1/?q=2" ]] && ok "/site1 redirects to /site1/ (query kept)" || bad "/site1: $l"
+j=$(get '/site1abc'); jq -e '.uri == "/site1abc" and .prefix == ""' <<<"$j" >/dev/null && ok "/site1abc is not taken: the site's route, path unchanged" || bad "/site1abc: $j"
+j=$(get '/other/x'); jq -e '.uri == "/other/x" and .prefix == ""' <<<"$j" >/dev/null && ok "other paths: unchanged, no X-Forwarded-Prefix" || bad "/other/x: $j"
+# nginx makes a relative Location absolute (absolute_redirect, on every route)
+l=$(hdr /site1/go location); [[ $l == http://printer.example.ch/site1/login ]] && ok "a relative redirect goes under the prefix" || bad "redirect /login: $l"
+l=$(hdr /site1/abs location); [[ $l == http://printer.example.ch/site1/login ]] && ok "a redirect to its host name goes under the prefix" || bad "redirect http://host/login: $l"
+l=$(hdr /site1/in location); [[ $l == http://printer.example.ch/site1/done ]] && ok "a redirect already under the prefix stays (no /site1/site1/)" || bad "redirect /site1/done: $l"
+l=$(hdr /site1/ext location); [[ $l == https://login.microsoftonline.com/tenant/authorize ]] && ok "a redirect to another host stays" || bad "external redirect: $l"
+c=$(hdr /site1/cookies set-cookie | paste -sd'|' -)
+[[ $c == "a=1; Path=/site1/|b=2; Path=/site1|c=3; Path=/site1/api; HttpOnly" ]] && ok "cookie paths go under the prefix, those already under it stay" || bad "cookies: $c"
+nginx -p "$strip/" -c nginx.conf -s stop
+kill "$echopid" 2>/dev/null || true
+[[ $fails == 0 ]] || { echo "$fails strip-prefix checks failed"; exit 1; }
 echo "--- files"; (cd "$rel" && find . -type f | sort | grep -v -e '^./static' -e '^./lua')

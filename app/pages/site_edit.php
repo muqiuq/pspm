@@ -41,7 +41,7 @@ function site_from_post(): array
             'paths' => preg_split('/[\s,]+/', trim((string)($r['paths'] ?? '')), -1, PREG_SPLIT_NO_EMPTY) ?: [],
             'listeners' => (array)($r['listeners'] ?? ['all']), 'action' => (string)($r['action'] ?? 'proxy'),
             'status' => (string)($r['status'] ?? '404'), 'redirect_url' => (string)($r['redirect_url'] ?? ''),
-            'redirect_code' => (string)($r['redirect_code'] ?? '302'), 'overrides' => $ov];
+            'redirect_code' => (string)($r['redirect_code'] ?? '302'), 'overrides' => $ov] + (isset($r['strip_prefix']) ? ['strip_prefix' => true] : []);
     }
     return [
         'enabled' => isset($_POST['enabled']),
@@ -115,7 +115,13 @@ function route_row(string $i, array $r, array $backendOpts, array $listenerOpts,
         $o .= '<div class="form-check form-check-inline"><input class="form-check-input" type="checkbox" name="routes[' . $i . '][listeners][]" value="' . h($k) . '"'
             . (in_array($k, $r['listeners'] ?? ['all'], true) ? ' checked' : '') . '><label class="form-check-label small">' . h($v) . '</label></div>';
     }
-    $o .= '</div></div><details class="mt-1"><summary class="small">Overrides for this route</summary><div class="row g-2 mt-1">';
+    $o .= '</div></div>';
+    $o .= '<div class="form-check mt-1"><input class="form-check-input" type="checkbox" id="strip_' . $i . '" name="routes[' . $i . '][strip_prefix]" value="1"' . (!empty($r['strip_prefix']) ? ' checked' : '') . '>'
+        . '<label class="form-check-label small" for="strip_' . $i . '">Pass to the backend without the prefix</label>'
+        . '<div class="form-text mt-0">For an application that runs at <code>/</code>: <code>/site1/page</code> reaches it as <code>/page</code>, <code>/site1</code> redirects to <code>/site1/</code>, '
+        . 'its redirects and cookie paths go under <code>/site1/</code>, and it gets <code>X-Forwarded-Prefix: /site1</code>. Links in its pages stay as it writes them. Prefix routes that proxy only.</div>'
+        . field_err($errors, "routes.$i.strip_prefix") . '</div>';
+    $o .= '<details class="mt-1"><summary class="small">Overrides for this route</summary><div class="row g-2 mt-1">';
     $o .= '<div class="col-md-5"><label class="form-label small d-block">Access (empty: the site\'s)</label>';
     foreach ($conds as $k => $v) {
         $o .= '<div class="form-check form-check-inline"><input class="form-check-input" type="checkbox" name="routes[' . $i . '][ov_conditions][]" value="' . h($k) . '"'

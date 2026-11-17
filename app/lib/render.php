@@ -364,22 +364,34 @@ final class Renderer
 
     private function routes(array $s, array $g, string $listener, bool $acmeProxied, bool $onlyExplicit = false): string
     {
+        $on = function (array $r) use ($listener, $onlyExplicit): bool {
+            if ($r['action'] === 'acme_proxy') return $listener === 'http';
+            return in_array($listener, $r['listeners'], true) || (in_array('all', $r['listeners'], true) && !$onlyExplicit);
+        };
+        // paths with a location of their own on this listener: the redirect /site1 → /site1/ of a route
+        // without its prefix never takes one of them
+        $taken = [];
+        foreach ($s['routes'] as $r) if ($on($r)) foreach ($r['paths'] as $p) $taken[$p] = true;
         $o = '';
         foreach ($s['routes'] as $r) {
-            $ls = $r['listeners'];
-            $on = in_array($listener, $ls, true) || (in_array('all', $ls, true) && !$onlyExplicit);
-            if ($r['action'] === 'acme_proxy') $on = $listener === 'http';
-            if (!$on) continue;
+            if (!$on($r)) continue;
+            $strip = !empty($r['strip_prefix']) && $r['match'] === 'prefix' && $r['action'] === 'proxy';   // older revisions have no value
             foreach ($r['paths'] as $path) {
                 if ($onlyExplicit && $path === '/' && $r['match'] === 'prefix') continue;   // "/" is already the redirect/503
                 $loc = $r['match'] === 'exact' ? "= $path" : ($path === '/' ? '/' : "^~ $path");
-                $o .= "    location $loc {\n" . $this->routeBody($s, $g, $r, $listener) . "    }\n";
+                $cut = $strip && $path !== '/' && str_ends_with($path, '/') ? $path : null;
+                $o .= "    location $loc {\n" . $this->routeBody($s, $g, $r, $listener, $cut) . "    }\n";
+                if ($cut !== null && !isset($taken[$base = rtrim($cut, '/')])) {
+                    $o .= "    location = $base {\n        return 301 $cut\$is_args\$args;\n    }\n";
+                    $taken[$base] = true;
+                }
             }
         }
         return $o;
     }
 
-    private function routeBody(array $s, array $g, array $r, string $listener): string
+    /** The body of a route's location; $cut is the prefix the backend gets the path without (e.g. /site1/), or null. */
+    private function routeBody(array $s, array $g, array $r, string $listener, ?string $cut = null): string
     {
         $i = '        ';
         $o = '';
@@ -404,12 +416,24 @@ final class Renderer
         if ($s['limits']['rate'] === 'standard') $o .= "{$i}limit_req zone=pspm_std burst={$g['rate_standard']['burst']} nodelay;\n";
         if ($s['limits']['rate'] === 'strict') $o .= "{$i}limit_req zone=pspm_strict burst={$g['rate_strict']['burst']} nodelay;\n";
         if ($s['limits']['limit_conn'] > 0) $o .= "{$i}limit_conn pspm_conn {$s['limits']['limit_conn']};\n";
-        $o .= "{$i}proxy_pass {$b['protocol']}://" . $this->upstreamName($b['id']) . ";\n";
+        // with a URI in proxy_pass, nginx replaces the matched prefix by it: /site1/page → /page
+        $o .= "{$i}proxy_pass {$b['protocol']}://" . $this->upstreamName($b['id']) . ($cut !== null ? '/' : '') . ";\n";
         $o .= "{$i}proxy_http_version 1.1;\n";
         $o .= "{$i}proxy_set_header Host " . ($p['host_header'] === 'fixed' ? $p['host_fixed'] : '$host') . ";\n";
         foreach (['X-Real-IP' => '$remote_addr', 'X-Forwarded-For' => '$remote_addr', 'X-Forwarded-Proto' => '$scheme',
                   'X-Forwarded-Host' => '$host', 'X-Forwarded-Port' => '$server_port'] as $hn => $hv) {
             $o .= "{$i}proxy_set_header $hn $hv;\n";
+        }
+        if ($cut !== null) {
+            // The backend runs at / and learns the prefix from X-Forwarded-Prefix. Its redirects (relative,
+            // or to this host name) and its cookie paths go under the prefix; those already under it stay.
+            // The first matching proxy_redirect / proxy_cookie_path wins.
+            $base = rtrim($cut, '/');
+            $o .= "{$i}proxy_set_header X-Forwarded-Prefix $base;\n";
+            foreach (['', 'https://$host', 'http://$host'] as $origin) {
+                $o .= "{$i}proxy_redirect $origin$base $origin$base;\n{$i}proxy_redirect $origin/ $origin$cut;\n";
+            }
+            $o .= "{$i}proxy_cookie_path $base $base;\n{$i}proxy_cookie_path / $cut;\n";
         }
         if ($p['websocket']) $o .= "{$i}proxy_set_header Upgrade \$http_upgrade;\n{$i}proxy_set_header Connection \$pspm_connection_upgrade;\n";
         else $o .= "{$i}proxy_set_header Connection \"\";\n";

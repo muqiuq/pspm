@@ -340,6 +340,51 @@ $so2 = (new Renderer(['id' => 6, 'document' => $own2], $facts))->render()['files
 ok((bool)preg_match('#location = /signin-oidc \{\n        set \$pspm_allow public;\n        set \$pspm_signin none;\n#', $so2), 'callbacks with access Public and sign-in none');
 ok(str_contains($http, "\nlarge_client_header_buffers 8 32k;\n"), 'http.conf: request headers 8 × 32k (both cookies together)');
 
+// A route without its prefix: an application that runs at / under /site1/ (plan §7.3); stored only when on
+$strip = ['id' => 'rs1', 'match' => 'prefix', 'paths' => ['/site1'], 'listeners' => ['all'], 'action' => 'proxy', 'status' => 404, 'redirect_url' => '',
+    'redirect_code' => 302, 'overrides' => [], 'strip_prefix' => true];
+$sp = $doc['sites'][0]; $sp['routes'][] = $strip;
+[$vs, $ve] = Validate::site($sp, $bids);
+eq($ve, [], 'without the prefix: valid');
+$rs = array_column($vs['routes'], null, 'id')['rs1'];
+eq([$rs['paths'], $rs['strip_prefix']], [['/site1/'], true], 'without the prefix: the path gets its trailing / (so /site1abc is not taken)');
+[$vp] = Validate::site($doc['sites'][0], $bids);
+ok(!array_filter($vp['routes'], fn($x) => array_key_exists('strip_prefix', $x)), 'off: nothing is stored, so existing routes (and their revisions) stay as they are');
+$sp2 = $sp; $sp2['routes'][count($sp2['routes']) - 1]['strip_prefix'] = false;
+ok(!array_key_exists('strip_prefix', array_column(Validate::site($sp2, $bids)[0]['routes'], null, 'id')['rs1']), 'off: false is not stored either');
+$ix = count($sp['routes']) - 1;
+foreach (['an exact route' => ['match' => 'exact'], 'a status route' => ['action' => 'status'], 'the path /' => ['paths' => ['/x/', '/']]] as $what => $chg) {
+    $bad = $sp; $bad['routes'][$ix] = array_replace($strip, $chg);
+    ok(isset(Validate::site($bad, $bids)[1]["routes.$ix.strip_prefix"]), "without the prefix: refused for $what");
+}
+$sd = $doc; $sd['sites'][0]['routes'][] = array_replace($strip, ['paths' => ['/site1/', '/site2/']]);
+$rr = (new Renderer(['id' => 8, 'document' => $sd], $facts))->render();
+eq($rr['errors'], [], 'without the prefix: renders');
+$sc = $rr['files']['sites/app.example.ch.conf'];
+ok((bool)preg_match('#\n    location \^~ /site1/ \{\n(.*?)\n    \}#s', $sc, $mm), 'without the prefix: a location ^~ /site1/');
+$body = $mm[1] ?? '';
+ok((bool)preg_match('#proxy_pass https?://pspm_b_[0-9a-f]+/;#', $body), 'proxy_pass with a URI: nginx replaces /site1/ by /');
+ok(str_contains($body, 'proxy_set_header X-Forwarded-Prefix /site1;'), 'the backend learns the prefix (X-Forwarded-Prefix)');
+ok(str_contains($body, "proxy_redirect /site1 /site1;\n        proxy_redirect / /site1/;\n        proxy_redirect https://\$host/site1 https://\$host/site1;\n        proxy_redirect https://\$host/ https://\$host/site1/;"),
+    'redirects: already under the prefix stay (first), the others go under it, relative and to this host name');
+ok(str_contains($body, "proxy_cookie_path /site1 /site1;\n        proxy_cookie_path / /site1/;"), 'cookie paths go under the prefix (two applications do not share cookies)');
+ok(str_contains($body, 'proxy_set_header X-Forwarded-Email $pspm_email;') && str_contains($body, 'proxy_set_header Host $host;'), 'identity and Host headers as on every route');
+ok(str_contains($sc, "    location = /site1 {\n        return 301 /site1/\$is_args\$args;\n    }\n") && str_contains($sc, "    location = /site2 {\n"), '/site1 and /site2 redirect to their trailing /');
+foreach (array_slice(explode("\nserver {\n", "\n$sc"), 1) as $srv) ok(substr_count($srv, 'location = /site1 {') <= 1, 'one redirect /site1 per server');
+preg_match_all('#\n    location / \{\n(.*?)\n    \}#s', $sc, $mm);
+$plain = array_values(array_filter($mm[1], fn($x) => str_contains($x, 'proxy_pass')));
+ok($plain && !array_filter($plain, fn($x) => str_contains($x, 'X-Forwarded-Prefix') || str_contains($x, 'proxy_redirect') || !preg_match('#proxy_pass https?://pspm_b_[0-9a-f]+;#', $x)),
+    'the other routes are proxied as before (no URI, no rewriting)');
+$sx = $sd; $sx['sites'][0]['routes'][] = ['id' => 'rx', 'match' => 'exact', 'paths' => ['/site1'], 'listeners' => ['all'], 'action' => 'status', 'status' => 204,
+    'redirect_url' => '', 'redirect_code' => 302, 'overrides' => []];
+$sxc = (new Renderer(['id' => 9, 'document' => $sx], $facts))->render()['files']['sites/app.example.ch.conf'];
+ok((bool)preg_match('#location = /site1 \{\n        return 204;#', $sxc) && !str_contains($sxc, 'return 301 /site1/'), 'a route of its own for /site1: no automatic redirect (no duplicate location)');
+$old = $doc; $old['sites'][0]['routes'][] = array_diff_key(array_replace($strip, ['paths' => ['/site1/']]), ['strip_prefix' => 1]);
+$oc = (new Renderer(['id' => 10, 'document' => $old], $facts))->render()['files']['sites/app.example.ch.conf'];
+ok(!str_contains($oc, 'X-Forwarded-Prefix') && !str_contains($oc, 'location = /site1 '), 'a route without the value (older revisions) renders as before');
+$rv = $review($doc, $sd);
+ok(str_contains($rv, '~ site app.example.ch: routes') && !str_contains($rv, 'OPENS'), 'review: a route without the prefix changes the routes and opens nothing');
+
 // Firewall problem summary (dashboard, health mail)
 eq(Status::firewallProblem(['sets' => ['pspm-block4' => 3], 'errors' => [], 'rules' => ['chain4' => 'ok']]), null, 'no firewall problem');
 ok(str_starts_with((string)Status::firewallProblem(['sets' => ['pspm-allowweb4' => -1, 'pspm-block4' => 1], 'errors' => ['ipset restore pspm-allowweb4: x'], 'rules' => ['chain4' => 'ok']]),

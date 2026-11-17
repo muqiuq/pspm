@@ -334,6 +334,9 @@ final class Validate
             }
             if (!$paths) { $e["routes.$i.paths"] ??= 'At least one path.'; continue; }
             $match = self::enum($r['match'] ?? 'prefix', ['prefix', 'exact']) ?? 'prefix';
+            // without the prefix to the backend: the path ends in / (so /site1 does not take /site1abc; /site1 redirects to /site1/)
+            $strip = !empty($r['strip_prefix']);
+            if ($strip && $match === 'prefix') $paths = array_values(array_unique(array_map(fn($p) => rtrim($p, '/') . '/', $paths)));
             foreach ($paths as $p) {
                 $key = "$match $p";
                 if (isset($seen[$key])) $e["routes.$i.paths"] = "Path $p appears twice.";
@@ -356,6 +359,12 @@ final class Validate
                 foreach ($route['paths'] as $p) {
                     if (str_starts_with($p, '/.well-known/acme-challenge')) $e["routes.$i.paths"] = 'The ACME path is handled by PSPM; use the action "proxy the ACME challenge" to hand it to the backend.';
                 }
+            }
+            if ($strip) {
+                // stored only when set: routes of existing installations stay exactly as they are
+                if ($route['match'] !== 'prefix' || $route['action'] !== 'proxy') $e["routes.$i.strip_prefix"] = 'Only a prefix route that proxies to a backend can pass the path without its prefix.';
+                elseif (in_array('/', $route['paths'], true)) $e["routes.$i.strip_prefix"] = 'There is no prefix to remove from /: use a path such as /site1/.';
+                else $route['strip_prefix'] = true;
             }
             if ($route['action'] === 'redirect') {
                 $route['redirect_url'] = self::url((string)($r['redirect_url'] ?? '')) ?? '';
