@@ -8,6 +8,42 @@ final class Blocks
 {
     public const DURATIONS = [86400, 7 * 86400, 30 * 86400];
 
+    /**
+     * The evidence an address needs in 24 h before the AI may judge it for a block, at
+     * aggressiveness 0.5. Any one is enough; a mix counts in proportion. Probes are requests
+     * by IP address or for host names no site serves (exploit paths included): scanners of
+     * the whole internet send a few, so it takes several. Exploits are requests for exploit
+     * paths at a site this proxy serves. Honeypots block on the first hit regardless.
+     */
+    public const EVIDENCE = ['probes' => 10, 'exploits' => 3, 'denied' => 20, 'not_found' => 40];
+
+    /** Blocking aggressiveness (Settings → AI decisions): 0 cautious, 0.5 default, 1 eager. */
+    public static function aggressiveness(): float
+    {
+        return max(0.0, min(1.0, (float)AI::settings()['aggressiveness']));
+    }
+
+    /** The confidence an AI block needs (both models): 0.95 at aggressiveness 0, 0.85 at 0.5, 0.75 at 1. */
+    public static function minConfidence(?float $a = null): float
+    {
+        return round(0.95 - 0.2 * max(0.0, min(1.0, $a ?? self::aggressiveness())), 3);
+    }
+
+    /** The evidence minimums in effect: EVIDENCE × 4 at aggressiveness 0, × 1 at 0.5, × ¼ at 1 (rounded up). */
+    public static function evidenceNeeded(?float $a = null): array
+    {
+        $f = 4 ** (1 - 2 * max(0.0, min(1.0, $a ?? self::aggressiveness())));
+        return array_map(fn(int $n) => max(1, (int)ceil($n * $f - 1e-9)), self::EVIDENCE);
+    }
+
+    /** How much of the needed evidence an address has, 1 = enough. $counts has the keys of EVIDENCE. */
+    public static function evidence(array $counts, ?array $needed = null): float
+    {
+        $s = 0.0;
+        foreach ($needed ?? self::evidenceNeeded() as $k => $n) $s += max(0, (int)($counts[$k] ?? 0)) / $n;
+        return round($s, 6);
+    }
+
     /** Is the address trusted or authorised (cleared addresses included)? */
     public static function trusted(string $ip): bool
     {
@@ -41,7 +77,7 @@ final class Blocks
         }
         if (self::isBlocked($cidr)) return 'already blocked';
         if ($verdict !== 'block') return $verdict === 'watch' ? 'watch' : 'benign';
-        if ($checkConfidence && $confidence < (float)AI::settings()['confidence']) return 'below threshold';
+        if ($checkConfidence && $confidence < self::minConfidence()) return 'below threshold';
         return null;
     }
 

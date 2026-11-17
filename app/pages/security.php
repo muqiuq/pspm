@@ -128,6 +128,8 @@ if ($tab === 'overview'):
       <div class="col-lg-4"><div class="card"><div class="card-body small">
         <h2 class="h6">Scan</h2>
         <div>Mode: <strong><?= h($ai['mode']) ?></strong> · AI: <?= AI::configured() ? h($ai['model']) : 'off (no model or key; set it in Settings)' ?></div>
+        <div>Aggressiveness: <a href="/settings#ai"><?= h(Blocks::aggressiveness()) ?></a> (blocks from confidence <?= h(Blocks::minConfidence()) ?>,
+          judged after <?= h(Blocks::evidenceNeeded()['probes']) ?> requests by IP or <?= h(Blocks::evidenceNeeded()['exploits']) ?> exploit attempts)</div>
         <?php $fb = Settings::get('scan', [])['feedback_tripped'] ?? null; if ($fb && $ai['mode'] === 'dry-run'): ?>
           <div class="text-warning-emphasis">Switched to dry-run by itself at <?= h(fmt_time($fb['at'])) ?>: admins removed <?= h($fb['removed']) ?> of <?= h($fb['blocks']) ?> AI blocks
             within 7 days. Check them (AI log), then set the mode back to enforce.</div><?php endif; ?>

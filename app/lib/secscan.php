@@ -144,7 +144,7 @@ final class SecScan
             elseif ($out === 'unknown-block') $fastBlocks[$key] = ['unknown-host', 'requests for host names that no site serves'];
             // activity per client and hour
             $a = &$act["$key|$hour"];
-            $a ??= ['req' => 0, 'denied' => 0, 's404' => 0, 's5xx' => 0, 'unknown' => 0, 'ust401' => 0, 'bytes' => 0, 'posts' => 0, 'tags' => [], 'paths' => [], 'uas' => [], 'sites' => [], 'out' => []];
+            $a ??= ['req' => 0, 'denied' => 0, 's404' => 0, 's5xx' => 0, 'unknown' => 0, 'exploits' => 0, 'ust401' => 0, 'bytes' => 0, 'posts' => 0, 'tags' => [], 'paths' => [], 'uas' => [], 'sites' => [], 'out' => []];
             $a['req']++; $a['bytes'] += (int)($d['bs'] ?? 0);
             if ($denied) $a['denied']++;
             if ($st === 404) $a['s404']++;
@@ -152,7 +152,9 @@ final class SecScan
             if ($unknown) $a['unknown']++;
             if ($ust === 401 || $ust === 403) $a['ust401']++;
             if (($d['m'] ?? '') === 'POST') $a['posts']++;
-            foreach (self::tags($path) as $t) $a['tags'][$t] = ($a['tags'][$t] ?? 0) + 1;
+            $tags = self::tags($path);
+            foreach ($tags as $t) $a['tags'][$t] = ($a['tags'][$t] ?? 0) + 1;
+            if ($tags && !$unknown) $a['exploits']++;   // at a site; by IP or for an unknown host name it is a probe ("unknown")
             if (count($a['paths']) < 40 || isset($a['paths'][$path])) $a['paths'][$path] = ($a['paths'][$path] ?? 0) + 1;
             $ua = substr((string)($d['ua'] ?? ''), 0, 150);
             if (count($a['uas']) < 5 || isset($a['uas'][$ua])) $a['uas'][$ua] = ($a['uas'][$ua] ?? 0) + 1;
@@ -280,11 +282,12 @@ final class SecScan
 
         self::feedback();
 
-        // candidates: untrusted addresses over a threshold in 24 h (plan §15.1)
+        // candidates: untrusted addresses with enough evidence in 24 h for their blocking aggressiveness (Blocks::EVIDENCE)
         $rows = DB::all("SELECT ip::text AS ip, jsonb_agg(data) AS d FROM ip_activity WHERE hour > now() - interval '24 hours' GROUP BY ip");
         $cands = [];
+        $need = Blocks::evidenceNeeded();
         foreach ($rows as $r) {
-            $sum = ['req' => 0, 'denied' => 0, 's404' => 0, 's5xx' => 0, 'unknown' => 0, 'posts' => 0, 'bytes' => 0, 'ust401' => 0,
+            $sum = ['req' => 0, 'denied' => 0, 's404' => 0, 's5xx' => 0, 'unknown' => 0, 'exploits' => 0, 'posts' => 0, 'bytes' => 0, 'ust401' => 0,
                 'tags' => [], 'paths' => [], 'uas' => [], 'sites' => [], 'out' => []];
             $hours = json_dec($r['d']);
             foreach ($hours as $h) foreach ($sum as $k => $_) {
@@ -294,12 +297,13 @@ final class SecScan
             $sum['active_hours'] = count($hours);
             $ip = explode('/', $r['ip'])[0];
             if (IP::neverBlocked($r['ip'])) continue;
-            if (!($sum['denied'] >= 10 || $sum['s404'] >= 20 || $sum['unknown'] >= 3 || $sum['tags'])) continue;
+            $sum['evidence'] = Blocks::evidence(['probes' => $sum['unknown'], 'exploits' => $sum['exploits'], 'denied' => $sum['denied'], 'not_found' => $sum['s404']], $need);
+            if ($sum['evidence'] < 1) continue;   // not yet: judged once the evidence suffices (no verdict now, so no 6-hour pause)
             if (Blocks::isBlocked($r['ip']) || Blocks::trusted($ip)) continue;
             if (DB::val("SELECT 1 FROM ai_verdicts WHERE kind = 'verdict' AND subject = ? AND created_at > now() - interval '6 hours'", [$r['ip']])) continue;
             $cands[$r['ip']] = $sum;
         }
-        uasort($cands, fn($a, $b) => ($b['denied'] + $b['s404'] + 10 * count($b['tags'])) <=> ($a['denied'] + $a['s404'] + 10 * count($a['tags'])));
+        uasort($cands, fn($a, $b) => $b['evidence'] <=> $a['evidence']);
         $cands = array_slice($cands, 0, 100, true);
         $stats['candidates'] = count($cands);
 
@@ -365,7 +369,7 @@ final class SecScan
                     $vv = $second[$cidr] ?? null;
                     $outcome = $e['why'];
                     if ($outcome === null) {
-                        $confirmed = $vv && $vv['verdict'] === 'block' && $vv['confidence'] >= (float)$ai['confidence'];
+                        $confirmed = $vv && $vv['verdict'] === 'block' && $vv['confidence'] >= Blocks::minConfidence();
                         $outcome = AI::configured('verify') && !$confirmed
                             ? self::dispute($cidr, $e, $vv, $verifyFailed)   // no automatic block: a finding with a reaction deadline
                             : Blocks::auto($e['ip'], 'ai', 'AI verdict: ' . mb_substr((string)($e['v']['reason'] ?? ''), 0, 200) . ($vv ? ' (verified)' : ''), $runBlocks);

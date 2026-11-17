@@ -29,7 +29,10 @@ if (is_post() && in_array(post('action'), ['runtime', 'test_mail'], true)) {
     $ai['timeout'] = Validate::int(post('ai_timeout'), 10, 900) ?? $ai['timeout'];
     $ai['batch'] = Validate::int(post('ai_batch'), 1, 50) ?? $ai['batch'];
     $ai['round_budget'] = 60 * (Validate::int(post('round_minutes'), 1, 60) ?? intdiv((int)$ai['round_budget'], 60));
-    $ai['confidence'] = max(0.5, min(0.99, (float)post('ai_confidence', $ai['confidence'])));
+    $ag = str_replace(',', '.', trim((string)post('ai_aggressiveness', '')));
+    if ($ag !== '' && (!is_numeric($ag) || (float)$ag < 0 || (float)$ag > 1)) $errors['ai_aggressiveness'] = 'Blocking aggressiveness: a number from 0 to 1, e.g. 0.5.';
+    elseif ($ag !== '') $ai['aggressiveness'] = round((float)$ag, 2);
+    unset($ai['confidence']);   // replaced by the aggressiveness (0.85 at 0.5)
     $ai['analyse_authorised'] = isset($_POST['ai_authorised']);
     $ai['reaction_hours'] = Validate::int(post('reaction_hours'), 1, 720) ?? $ai['reaction_hours'];
     Settings::set('ai', $ai);
@@ -154,7 +157,7 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 
 <div class="settings-group col-xxl-10" id="configuration">
 <h2 class="h5">Configuration <span class="badge text-bg-warning align-middle">applied with install.sh</span></h2>
-<?= errors_box(array_diff_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1, 'verify_base_url' => 1]) ? ['Please correct the marked fields.'] : []) ?>
+<?= errors_box(array_diff_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1, 'verify_base_url' => 1, 'ai_aggressiveness' => 1]) ? ['Please correct the marked fields.'] : []) ?>
 <form method="post"><?= csrf_field() ?>
 <div class="row g-3">
   <div class="col-lg-6">
@@ -197,7 +200,7 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
 
 <div class="settings-group col-xxl-10 mt-5" id="runtime">
 <h2 class="h5">Runtime <span class="badge text-bg-success align-middle">takes effect at once</span></h2>
-<?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1, 'verify_base_url' => 1])) ?>
+<?= errors_box(array_intersect_key($errors, ['login' => 1, 'smtp_security' => 1, 'backup_pass' => 1, 'ai_base_url' => 1, 'check_base_url' => 1, 'verify_base_url' => 1, 'ai_aggressiveness' => 1])) ?>
 <form method="post" id="test-mail-form"><?= csrf_field() ?><input type="hidden" name="action" value="test_mail"></form>
 <form method="post" autocomplete="off"><?= csrf_field() ?><input type="hidden" name="action" value="runtime">
 <div class="row g-3">
@@ -230,7 +233,12 @@ $ai = AI::settings(); $smtp = Notify::smtp(); $uh = Settings::get('unknown_hosts
           'same' => f_check('verify_same', 'Same API URL and key as the main model', $vf['same_as_main'])]) ?>
     <?= $end ?>
     <?= $card('ai', 'AI decisions', 'How AI answers turn into blocks; these apply to every model.') ?>
-      <?= f_text('ai_confidence', 'Block from confidence', $ai['confidence'], [], '0.5–0.99') ?>
+      <?php $need = Blocks::evidenceNeeded(); ?>
+      <?= f_text('ai_aggressiveness', 'Blocking aggressiveness', $ai['aggressiveness'], $errors, '0–1, default 0.5: 0 blocks only on overwhelming evidence, 1 on the first clear signs. '
+          . 'Now the AI judges an address only after, within 24 hours, ' . $need['probes'] . ' requests by IP address or for unknown host names, '
+          . $need['exploits'] . ' for exploit paths at a site, ' . $need['denied'] . ' refused or ' . $need['not_found'] . ' not found (or a mix), '
+          . 'and blocks from confidence ' . Blocks::minConfidence() . '. Honeypots still block on the first hit; the unknown-host rule (Blocking and trust) keeps its own count.',
+          'number', '', ['min' => '0', 'max' => '1', 'step' => '0.01']) ?>
       <?= f_check('ai_authorised', 'Also analyse authorised actors (pseudonymised; reported, never blocked)', (bool)$ai['analyse_authorised']) ?>
       <?= f_text('reaction_hours', 'Reaction time for risky findings (hours)', $ai['reaction_hours'], [], 'No reaction within this time blocks the (untrusted) address.', 'number') ?>
       <?= f_text('round_minutes', 'AI time per analysis round (minutes)', intdiv((int)$ai['round_budget'], 60), [], 'After this, no new batch starts; the rest comes back in the next round (every 5 minutes). 1–60.', 'number') ?>

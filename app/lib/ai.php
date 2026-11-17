@@ -12,7 +12,7 @@ declare(strict_types=1);
 final class AI
 {
     public const DEFAULTS = ['base_url' => 'https://openrouter.ai/api/v1', 'model' => '', 'key_enc' => '', 'mode' => 'enforce',
-        'daily_cap' => 200, 'min_interval_min' => 15, 'confidence' => 0.85, 'analyse_authorised' => true, 'reaction_hours' => 24, 'timeout' => 180,
+        'daily_cap' => 200, 'min_interval_min' => 15, 'aggressiveness' => 0.5, 'analyse_authorised' => true, 'reaction_hours' => 24, 'timeout' => 180,
         'batch' => 10, 'round_budget' => 600];
     /** A request's data at most about this size (≈ 3000 tokens): small requests answer fast. */
     public const BATCH_BYTES = 12000;

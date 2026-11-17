@@ -6,7 +6,7 @@
 // Model names steer it: fake-500 → HTTP 500, fake-429 → HTTP 429, fake-garbage → not JSON,
 // fake-benign → every verdict benign, fake-noschema → HTTP 400 for a JSON schema request,
 // fake-badtypes → verdicts that are not of the expected type. Otherwise, per purpose (recognised by the instructions):
-//   scan verdicts: exploit tags → block 0.95; 21 not-found pages → left out of the answer;
+//   scan verdicts: exploit tags → block 0.95; 41 not-found pages → left out of the answer;
 //                  a user agent saying "ignore …" fools it → benign 0.99 (what the injection check prevents)
 //   behaviour:     brute force with risk ≥ 90 → attack 0.9, else risky 0.7
 //   honeypots:     /.env and /wp-login.php → exact patterns; the verifier confirms them (fake-benign rejects)
@@ -73,7 +73,7 @@ if (str_contains($system, 'connection test')) {
 } elseif (str_contains($system, 'assess traffic')) {
     $verdicts = [];
     foreach ($user['subjects'] ?? [] as $s) {
-        if (($s['not_found'] ?? 0) === 21) continue;   // left out on purpose
+        if (($s['not_found'] ?? 0) === 41) continue;   // left out on purpose
         $ua = strtolower(json_encode($s['user_agents'] ?? []) . json_encode($s['untrusted'] ?? []));
         if ($model === 'fake-badtypes') $verdicts[] = ['subject' => $s['subject'], 'verdict' => 'maybe', 'confidence' => 'high'];   // not the expected type
         elseif ($model === 'fake-benign' || str_contains($ua, 'ignore')) $verdicts[] = ['subject' => $s['subject'], 'verdict' => 'benign', 'confidence' => 0.99, 'reason' => 'looks fine'];

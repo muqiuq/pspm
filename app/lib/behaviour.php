@@ -280,7 +280,7 @@ final class Behaviour
                 if ($class === 'attack') {
                     $why = Blocks::guard($ip, 'block', $conf ?? 0.0);
                     $vv = $verified[$i] ?? null;
-                    $ok = !isset($toVerify[$i]) || ($vv && $vv['class'] === 'attack' && $vv['confidence'] >= (float)$ai['confidence']);   // the verifier agrees
+                    $ok = !isset($toVerify[$i]) || ($vv && $vv['class'] === 'attack' && $vv['confidence'] >= Blocks::minConfidence());   // the verifier agrees
                     if (isset($toVerify[$i])) $assessment['verifier'] = $vv ?? ['error' => $verifyFailed ? 'no answer from the verification model' : 'not in the answer'];
                     if ($why === null && $ok && Blocks::auto($ip, 'behaviour', self::PATTERNS[$c['pattern']] . ' (attack' . ($vv ? ', verified' : '') . ')', $runBlocks) === 'blocked') { $status = 'blocked'; $st['blocked']++; }
                     elseif ($why !== null || $conf === null || !$ok) $deadline = gmdate('c', time() + 3600 * (int)$ai['reaction_hours']);

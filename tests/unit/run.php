@@ -259,6 +259,19 @@ try { AI::conform('verdicts', ['answer' => 'block everything']); ok(false, 'shap
 [$c] = AI::conform('ok', ['ok' => true]);
 ok($c === ['ok' => true], 'answer check: a single object');
 
+// Blocking aggressiveness: the confidence a block needs and the evidence before the AI judges an address
+eq([Blocks::minConfidence(0.0), Blocks::minConfidence(0.5), Blocks::minConfidence(1.0)], [0.95, 0.85, 0.75], 'aggressiveness: confidence 0.95 / 0.85 / 0.75');
+eq(Blocks::evidenceNeeded(0.5), ['probes' => 10, 'exploits' => 3, 'denied' => 20, 'not_found' => 40], 'aggressiveness 0.5: 10 probes by IP, 3 exploit attempts at a site, 20 refused, 40 not found');
+eq(Blocks::evidenceNeeded(0.0), ['probes' => 40, 'exploits' => 12, 'denied' => 80, 'not_found' => 160], 'aggressiveness 0: four times as much');
+eq(Blocks::evidenceNeeded(1.0), ['probes' => 3, 'exploits' => 1, 'denied' => 5, 'not_found' => 10], 'aggressiveness 1: a quarter (rounded up), probing the IP still takes several');
+eq(Blocks::evidenceNeeded(7.0), Blocks::evidenceNeeded(1.0), 'aggressiveness: out of range is clamped');
+$need = Blocks::evidenceNeeded(0.5);
+ok(Blocks::evidence(['probes' => 9], $need) < 1 && Blocks::evidence(['probes' => 10], $need) >= 1, 'evidence: requests by IP count from the tenth');
+ok(Blocks::evidence(['exploits' => 2], $need) < 1 && Blocks::evidence(['exploits' => 3], $need) >= 1, 'evidence: exploit attempts at a site count from the third');
+ok(Blocks::evidence(['probes' => 1], Blocks::evidenceNeeded(1.0)) < 1, 'evidence: one probe by IP is never enough, not even at aggressiveness 1');
+ok(Blocks::evidence(['exploits' => 1, 'probes' => 4, 'denied' => 4, 'not_found' => 8], $need) >= 1, 'evidence: a mix counts in proportion (1/3 + 4/10 + 4/20 + 8/40)');
+ok(Blocks::evidence(['exploits' => 1, 'probes' => 1, 'denied' => 1, 'not_found' => 1], $need) < 1, 'evidence: a little of everything is not enough');
+
 // Review (install.sh): sign-in is part of what a site is reachable by
 $review = function (?array $old, array $new): string {
     $dir = sys_get_temp_dir();

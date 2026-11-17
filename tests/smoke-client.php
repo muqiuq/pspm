@@ -94,12 +94,21 @@ check(str_contains($b, 'is ready'), 'the dashboard says the revision is ready');
 check($c === 200 && str_contains($b, 'applied with install.sh') && str_contains($b, 'takes effect at once') && str_contains($b, 'id="signin-protection"'),
     'settings: configuration and runtime sections');
 $runtime = ['action' => 'runtime', 'max_failures' => '7', 'window_mins' => '15', 'ban_hours' => '2',
-    'traps_enabled' => '1', 'pki_strict' => '1', 'ai_authorised' => '1', 'smtp_port' => '587', 'smtp_security' => 'starttls', 'ai_daily_cap' => '200', 'ai_confidence' => '0.85',
+    'traps_enabled' => '1', 'pki_strict' => '1', 'ai_authorised' => '1', 'smtp_port' => '587', 'smtp_security' => 'starttls', 'ai_daily_cap' => '200', 'ai_aggressiveness' => '0.5',
     'reaction_hours' => '24', 'unknown_threshold' => '5', 'unknown_window' => '60', 'authorised_days' => '30', 'behaviour_hours' => '12'];
 [$c, , $loc] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime);
 [, $b] = req('GET', '/settings');
 check($c === 303 && str_contains($b, 'name="max_failures" value="7"') && str_contains($b, 'name="ban_hours" value="2"'), 'settings: sign-in protection is saved with the runtime settings');
 check(str_contains($b, 'name="behaviour_hours" value="12"'), 'settings: behaviour search every 12 hours by default');
+check(str_contains($b, 'name="ai_aggressiveness" value="0.5"') && str_contains($b, 'only after, within 24 hours, 10 requests by IP address') && str_contains($b, 'blocks from confidence 0.85'),
+    'settings: blocking aggressiveness 0.5 by default, with what it means now');
+[$c, $b] = req('POST', '/settings', ['_csrf' => csrf($b)] + array_replace($runtime, ['ai_aggressiveness' => '1.5']));
+check($c === 200 && str_contains($b, 'a number from 0 to 1'), 'settings: an aggressiveness outside 0–1 is refused');
+[$c] = req('POST', '/settings', ['_csrf' => csrf($b)] + array_replace($runtime, ['ai_aggressiveness' => '0,3']));
+[, $b] = req('GET', '/settings');
+check($c === 303 && str_contains($b, 'name="ai_aggressiveness" value="0.3"') && str_contains($b, 'blocks from confidence 0.89'), 'settings: a decimal comma is fine; the confidence follows (0.95 − 0.2 × 0.3)');
+[$c, , $loc] = req('POST', '/settings', ['_csrf' => csrf($b)] + $runtime);
+[, $b] = req('GET', '/settings');
 // Models: the main model's field group, its Test button, and the call in the AI log
 check(str_contains($b, 'id="models"') && str_contains($b, '>Main model</legend>') && str_contains($b, 'name="test_role" value="main">Save and test'), 'settings: Models card with the main model and Save and test');
 check(str_contains($b, '>Injection check</legend>') && str_contains($b, 'name="check_type"') && str_contains($b, 'name="check_threshold"') && str_contains($b, 'value="check">Save and test'),

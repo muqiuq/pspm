@@ -19,7 +19,7 @@ Where the build differs from the first plan, the section says so (*Built:*).
 
 | Use | Where | What happens |
 |---|---|---|
-| Scan verdicts | `app/lib/secscan.php` (`analyse`) | Every 5 min. Untrusted addresses with, in 24 h, ≥ 10 refused requests, ≥ 20 not-found pages, ≥ 3 unknown host names or a known exploit path become candidates (max. 100). They go to the model in batches of 25, pseudonymised: counts, up to 20 paths, 3 user agents. The answer is *block / watch / benign* with a confidence. PSPM blocks on *block* with confidence ≥ 0.85, if the guards allow. |
+| Scan verdicts | `app/lib/secscan.php` (`analyse`) | Every 5 min. Untrusted addresses with, in 24 h, ≥ 10 refused requests, ≥ 20 not-found pages, ≥ 3 unknown host names or a known exploit path become candidates (max. 100). *Since 2026-11-17 the evidence follows the blocking aggressiveness (§7).* They go to the model in batches of 25, pseudonymised: counts, up to 20 paths, 3 user agents. The answer is *block / watch / benign* with a confidence. PSPM blocks on *block* with confidence ≥ 0.85, if the guards allow. |
 | Behaviour findings | `app/lib/behaviour.php` (`analyse`) | Every 12 h by default (setting; *Run now* forces it), over the last 24 h. Fixed detectors (brute force, enumeration, scraping, leaked link, …) open a finding; the model re-rates each finding in its own call. *Attack* blocks at once; anything else gets a reaction deadline (24 h by default). The deadlines and reminders are checked every 5 min. |
 | Honeypot mining | `app/lib/traps.php` (`mine`) | Every 3 h the model proposes trap paths from refused requests; votes and attacker counts promote them through *shadow* to *active*. Up to 500 traps can be active today. |
 
@@ -295,6 +295,23 @@ Injection check results are cached for 24 hours. The AI log is not part of expor
   - behaviour call errors are logged
   - addresses the model skips are recorded and not sent again for 6 hours
   - behaviour findings are assessed in batches
+
+## 7. Blocking aggressiveness
+
+*Built 2026-11-17.* The AI blocked too eagerly: one exploit path, or three requests to the
+bare IP without a host name, made an address a candidate, and models rate scanners at
+0.9 and more, so the fixed confidence of 0.85 hardly filtered.
+
+- **One setting**, *Settings → AI decisions → Blocking aggressiveness*, 0–1, default
+  0.5. It replaces *Block from confidence*.
+- **Evidence before the AI judges an address** (`Blocks::EVIDENCE`, scaled by
+  4^(1 − 2a)): at 0.5, within 24 h, 10 requests by IP address or for unknown host names
+  (*probes*, exploit paths included), 3 requests for exploit paths at a site, 20 refused
+  or 40 not found, or a mix in proportion. Addresses below it are not sent, which also
+  saves calls and avoids the 6-hour pause after a verdict.
+- **Confidence for a block:** 0.95 − 0.2a (0.85 at 0.5, as before), for both models and
+  behaviour *attack*.
+- Honeypots and the unknown-host rule are not affected. The table is in plan §15.4.
 
 ## Optional, not planned: system rules
 
