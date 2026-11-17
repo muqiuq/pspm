@@ -384,9 +384,12 @@ final class Renderer
         $i = '        ';
         $o = '';
         $ov = $r['overrides'];
-        if ($r['action'] === 'acme_proxy') $o .= "{$i}set \$pspm_allow public;\n";
+        // Let's Encrypt must always reach the challenge: public, and never sent to the sign-in
+        // (a site that requires sign-in would answer 401, and its certificate could not be renewed)
+        if ($r['action'] === 'acme_proxy') $o .= "{$i}set \$pspm_allow public;\n{$i}set \$pspm_signin none;\n";
         elseif (!empty($ov['access'])) {
-            $o .= "{$i}set \$pspm_allow " . implode(',', $ov['access']['conditions']) . ";\n";
+            // without own conditions the site's stay ($pspm_allow from the server); the sign-in can be overridden alone
+            if (!empty($ov['access']['conditions'])) $o .= "{$i}set \$pspm_allow " . implode(',', $ov['access']['conditions']) . ";\n";
             if (isset($ov['access']['signin']) && $this->signinProvider($s)) $o .= "{$i}set \$pspm_signin {$ov['access']['signin']};\n";
             elseif (isset($ov['access']['signin'])) $o .= "{$i}set \$pspm_signin none;\n";
         }
@@ -562,7 +565,7 @@ final class Renderer
 
     private function acmeLocation(): string
     {
-        return "    location ^~ /.well-known/acme-challenge/ {\n        set \$pspm_allow public;\n        root {$this->facts['paths']['acme_root']};\n"
+        return "    location ^~ /.well-known/acme-challenge/ {\n        set \$pspm_allow public;\n        set \$pspm_signin none;\n        root {$this->facts['paths']['acme_root']};\n"
              . "        default_type text/plain;\n        try_files \$uri =404;\n    }\n";
     }
 

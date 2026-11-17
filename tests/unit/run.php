@@ -298,6 +298,48 @@ $any = $doc; $any['sites'][0]['access']['signin']['groups'] = [];
 ok(str_contains($review($doc, $any), 'more users may sign in (groups: no limit)'), 'dropping the group limit opens');
 ok(str_contains($review(null, $any), 'or Microsoft sign-in (Example staff: any account from example.ch)'), 'without limits: every account the provider accepts');
 
+// An application with its own sign-in behind the site's: its callbacks pass without PSPM's
+// sign-in (route override), to the same backend with the same headers
+$cb = ['id' => 'rcb', 'match' => 'exact', 'paths' => ['/signin-oidc', '/signout-callback-oidc'], 'listeners' => ['all'], 'action' => 'proxy',
+    'status' => 404, 'redirect_url' => '', 'redirect_code' => 302, 'overrides' => []];
+$own = $doc;
+$own['sites'][0]['access']['conditions'] = ['public'];
+$own['sites'][0]['access']['signin']['mode'] = 'required';
+$own['sites'][0]['routes'][] = array_merge($cb, ['overrides' => ['access' => ['signin' => 'none']]]);
+$bids = array_column($doc['backends'], 'id');
+[$vs, $ve] = Validate::site($own['sites'][0], $bids);
+eq($ve, [], 'sign-in override alone: valid');
+eq(array_column($vs['routes'], 'overrides', 'id')['rcb'], ['access' => ['signin' => 'none']], 'sign-in override alone is kept (it was dropped without conditions)');
+$bogus = $own['sites'][0]; $bogus['routes'][count($bogus['routes']) - 1]['overrides'] = ['access' => ['signin' => 'sometimes']];
+eq(array_column(Validate::site($bogus, $bids)[0]['routes'], 'overrides', 'id')['rcb'], ['access' => ['signin' => 'none']], 'an unknown sign-in mode becomes none');
+$ro = (new Renderer(['id' => 5, 'document' => $own], $facts))->render();
+eq($ro['errors'], [], 'own sign-in: renders');
+$so = $ro['files']['sites/app.example.ch.conf'];
+foreach (['/signin-oidc', '/signout-callback-oidc'] as $cp) {
+    ok((bool)preg_match('#\n    location = ' . preg_quote($cp, '#') . ' \{\n(.*?)\n    \}#s', $so, $mm), "own sign-in: exact location $cp");
+    $body = $mm[1] ?? '';
+    ok(str_contains($body, 'set $pspm_signin none;') && !str_contains($body, 'set $pspm_allow'), "$cp: sign-in off, the site's conditions stay");
+    ok(str_contains($body, 'proxy_set_header Host $host;') && str_contains($body, 'proxy_set_header X-Forwarded-Proto $scheme;')
+        && str_contains($body, 'proxy_set_header X-Forwarded-For $remote_addr;') && str_contains($body, 'proxy_pass http://pspm_b_'), "$cp: proxied with Host and X-Forwarded-*");
+}
+ok(str_contains($review($req, $own), 'OPENS: site app.example.ch: route /signin-oidc /signout-callback-oidc without the required sign-in'), 'review: the callback route opens');
+// Let's Encrypt reaches the challenge on a site that requires sign-in (it got 401, so no renewal):
+// PSPM's own ACME location and a route that proxies the challenge to the backend
+$acme = $own;
+$acme['sites'][1]['access']['signin'] = $own['sites'][0]['access']['signin'];   // new.example.ch: acme_proxy route
+$ra2 = (new Renderer(['id' => 7, 'document' => $acme], $facts))->render();
+eq($ra2['errors'], [], 'sign-in required with an ACME route: renders');
+eq(preg_match_all('#location \^~ /\.well-known/acme-challenge/ \{\n        set \$pspm_allow public;\n        set \$pspm_signin none;\n#', $ra2['files']['sites/app.example.ch.conf']), 1,
+    'ACME location: public and without sign-in');
+ok((bool)preg_match('#location \^~ /\.well-known/acme-challenge/ \{\n        set \$pspm_allow public;\n        set \$pspm_signin none;\n.*?proxy_pass#s', $ra2['files']['sites/new.example.ch.conf']),
+    'proxied ACME challenge: public and without sign-in');
+// the same with access Public (any site policy): both are set in the location
+$own2 = $doc;
+$own2['sites'][0]['routes'][] = array_merge($cb, ['overrides' => ['access' => ['conditions' => ['public'], 'signin' => 'none']]]);
+$so2 = (new Renderer(['id' => 6, 'document' => $own2], $facts))->render()['files']['sites/app.example.ch.conf'];
+ok((bool)preg_match('#location = /signin-oidc \{\n        set \$pspm_allow public;\n        set \$pspm_signin none;\n#', $so2), 'callbacks with access Public and sign-in none');
+ok(str_contains($http, "\nlarge_client_header_buffers 8 32k;\n"), 'http.conf: request headers 8 × 32k (both cookies together)');
+
 // Firewall problem summary (dashboard, health mail)
 eq(Status::firewallProblem(['sets' => ['pspm-block4' => 3], 'errors' => [], 'rules' => ['chain4' => 'ok']]), null, 'no firewall problem');
 ok(str_starts_with((string)Status::firewallProblem(['sets' => ['pspm-allowweb4' => -1, 'pspm-block4' => 1], 'errors' => ['ipset restore pspm-allowweb4: x'], 'rules' => ['chain4' => 'ok']]),

@@ -55,6 +55,23 @@ if ($step === 'setup') {
     [$rid, $errs] = Revisions::commit("big headers: {$kb}k");
     if ($errs) throw new RuntimeException(implode('; ', $errs));
     echo "revision $rid committed\n";
+} elseif ($step === 'owncallback') {
+    // an application with its own Microsoft sign-in behind sso.pspm.test (sign-in required): its
+    // callbacks pass without PSPM's sign-in, to backend "big" (tests/box-backend.php echoes the headers); "off" removes the route
+    $sid = (string)DB::val("SELECT site_id FROM site_hosts WHERE host = 'sso.pspm.test'");
+    $big = (string)DB::val("SELECT id FROM backends WHERE name = 'big'");
+    $cur = Model::site($sid);
+    $in = $cur; unset($in['id'], $in['updated_at']);
+    $in['routes'] = array_values(array_filter($in['routes'], fn($r) => $r['id'] !== 'rcb'));
+    if (($argv[2] ?? '') !== 'off') $in['routes'][] = ['id' => 'rcb', 'match' => 'exact', 'paths' => ['/signin-oidc', '/signout-callback-oidc'], 'listeners' => ['all'],
+        'action' => 'proxy', 'overrides' => ['access' => ['signin' => 'none'], 'backend' => $big]];
+    [$s, $e] = Validate::site($in, array_column(Model::backends(), 'id'));
+    if ($e) throw new RuntimeException(json_encode($e));
+    [, $err] = Model::saveSite($sid, $s, $cur['updated_at']);
+    if ($err) throw new RuntimeException($err);
+    [$rid, $errs] = Revisions::commit('own sign-in callbacks ' . ($argv[2] ?? 'on'));
+    if ($errs) throw new RuntimeException(implode('; ', $errs));
+    echo "revision $rid committed\n";
 } elseif ($step === 'adminhost') {
     // the admin host name, e.g. the sign-in host (one server for both); '' = none; optional admin access list
     $g = Settings::global();

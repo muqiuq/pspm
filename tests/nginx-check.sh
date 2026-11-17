@@ -23,4 +23,11 @@ rm -rf "$shared"; mkdir -p "$shared"
 php /src/tests/render-fixture.php "$shared" shared >/dev/null
 cp -r /src/nginx/static "$shared/static"; cp -r /src/lua "$shared/lua"
 ngt "$shared"
+# an application with its own sign-in: its callbacks pass without PSPM's
+own=/tmp/release-own
+rm -rf "$own"; mkdir -p "$own"
+php /src/tests/render-fixture.php "$own" own >/dev/null
+cp -r /src/nginx/static "$own/static"; cp -r /src/lua "$own/lua"
+ngt "$own"
+grep -A3 'location = /signin-oidc' "$own/sites/app.example.ch.conf"
 echo "--- files"; (cd "$rel" && find . -type f | sort | grep -v -e '^./static' -e '^./lua')

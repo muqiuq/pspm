@@ -366,6 +366,9 @@ final class Validate
                 [$oa, $oe] = self::access((array)$o['access'], false);
                 foreach ($oe as $k => $v) $e["routes.$i.access.$k"] = $v;
                 $route['overrides']['access'] = $oa;
+            } elseif (isset($o['access']['signin']) && $o['access']['signin'] !== '') {
+                // the sign-in alone (e.g. "none" for an application's own sign-in callback); the site's conditions stay
+                $route['overrides']['access'] = ['signin' => self::enum($o['access']['signin'], ['none', 'alternative', 'required']) ?? 'none'];
             }
             if (isset($o['max_body']) && trim((string)$o['max_body']) !== '') {
                 $route['overrides']['max_body'] = self::size((string)$o['max_body']) ?? '';

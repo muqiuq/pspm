@@ -30,8 +30,10 @@ function site_from_post(): array
     foreach ((array)post('routes', []) as $r) {
         if (!is_array($r)) continue;
         $ov = [];
-        if (!empty($r['ov_conditions'])) $ov['access'] = ['conditions' => (array)$r['ov_conditions']]
-            + (($r['ov_signin'] ?? '') !== '' ? ['signin' => (string)$r['ov_signin']] : []);
+        // the access and the sign-in can each be overridden alone; what is not overridden is the site's
+        $ovc = array_values((array)($r['ov_conditions'] ?? []));
+        $ovs = (string)($r['ov_signin'] ?? '');
+        if ($ovc || $ovs !== '') $ov['access'] = ($ovc ? ['conditions' => $ovc] : []) + ($ovs !== '' ? ['signin' => $ovs] : []);
         if (trim((string)($r['ov_max_body'] ?? '')) !== '') $ov['max_body'] = $r['ov_max_body'];
         if (trim((string)($r['ov_read_timeout'] ?? '')) !== '') $ov['read_timeout'] = $r['ov_read_timeout'];
         if (!empty($r['ov_backend'])) $ov['backend'] = $r['ov_backend'];
@@ -120,7 +122,8 @@ function route_row(string $i, array $r, array $backendOpts, array $listenerOpts,
             . (in_array($k, $ov['access']['conditions'] ?? [], true) ? ' checked' : '') . '><label class="form-check-label small">' . h(explode(' (', $v)[0]) . '</label></div>';
     }
     $o .= field_err($errors, "routes.$i.access.conditions") . '</div>';
-    $o .= '<div class="col-md-12"><label class="form-label small">Sign-in for this route (with an access override)</label>' . $sel('ov_signin', ['' => 'site\'s', 'none' => 'none', 'alternative' => 'alternative', 'required' => 'required'], $ov['access']['signin'] ?? '') . '</div>';
+    $o .= '<div class="col-md-12"><label class="form-label small">Sign-in for this route</label>' . $sel('ov_signin', ['' => 'site\'s', 'none' => 'none', 'alternative' => 'alternative', 'required' => 'required'], $ov['access']['signin'] ?? '')
+        . '<div class="form-text">An application with its own Microsoft sign-in behind this one (callbacks such as <code>/signin-oidc</code> <code>/signout-callback-oidc</code>): match <em>exact</em>, access <em>Public</em>, sign-in <em>none</em>. See <a href="/help/signin">Help</a>.</div></div>';
     $o .= '<div class="col-md-2"><label class="form-label small">Max body</label><input class="form-control form-control-sm" name="routes[' . $i . '][ov_max_body]" value="' . h($ov['max_body'] ?? '') . '" placeholder="site"></div>';
     $o .= '<div class="col-md-2"><label class="form-label small">Read timeout (s)</label><input class="form-control form-control-sm" name="routes[' . $i . '][ov_read_timeout]" value="' . h($ov['read_timeout'] ?? '') . '" placeholder="site"></div>';
     $o .= '<div class="col-md-3"><label class="form-label small">Backend</label>' . $sel('ov_backend', ['' => 'site\'s'] + array_slice($backendOpts, 1, null, true), $ov['backend'] ?? '') . field_err($errors, "routes.$i.backend") . '</div>';

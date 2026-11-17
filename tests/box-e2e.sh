@@ -46,6 +46,43 @@ grep -q "upstream sent too big header" /var/log/nginx/error.log && ok "that 502 
 pp bigheader 64 >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-big2.out 2>&1
 grep -q "~ backend big: response header buffer 16k → 64k" /root/apply-big2.out && ok "the review names the buffer change" || bad "review: $(grep 'backend big' /root/apply-big2.out)"
 c=$(big 40000); [[ $c == 200 ]] && ok "40 KB response header with the backend set to 64k: 200" || bad "40 KB header, 64k buffer: $c"
+# an application with its own sign-in on sso.pspm.test (sign-in required): Microsoft's form POST
+# to /signin-oidc comes without PSPM's cookie (SameSite=Lax) and must reach the application
+cb() { curl -sk --resolve sso.pspm.test:443:127.0.0.1 "$@"; }
+if [[ $(cb -o /dev/null -w '%{http_code}' -X POST -d x https://sso.pspm.test/signin-oidc) == 200 ]]; then   # a rerun: the route is there
+    pp owncallback off >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-own-off.out 2>&1
+fi
+code=$(cb -o /dev/null -w '%{http_code}' -X POST -d 'code=x&state=y' https://sso.pspm.test/signin-oidc)
+[[ $code == 401 || $code == 302 ]] && ok "before: the callback POST is sent to the sign-in ($code)" || bad "callback before the route: $code"
+pp owncallback >/dev/null && /opt/pspm/install.sh apply --yes >/root/apply-own.out 2>&1
+grep -q "OPENS.*route /signin-oidc /signout-callback-oidc without the required sign-in" /root/apply-own.out && ok "the review names the callback route as opening" || bad "review: $(grep -i opens /root/apply-own.out)"
+j=$(cb -X POST -H 'Origin: https://login.microsoftonline.com' -b '_pspm_x=secret; .AspNetCore.Correlation.abc=N' -d 'code=x&state=y' https://sso.pspm.test/signin-oidc)
+jq -e '.method == "POST" and .body == "code=x&state=y" and .host == "sso.pspm.test" and .proto == "https" and .xff == "127.0.0.1" and .user == ""' <<<"$j" >/dev/null \
+    && ok "the callback POST reaches the application with Host, X-Forwarded-Proto https and X-Forwarded-For" || bad "callback POST: $j"
+jq -e '.cookie == ".AspNetCore.Correlation.abc=N"' <<<"$j" >/dev/null && ok "the application gets its cookies, never PSPM's" || bad "cookies at the application: $j"
+j=$(cb 'https://sso.pspm.test/signout-callback-oidc?state=z')
+jq -e '.method == "GET"' <<<"$j" >/dev/null && ok "the sign-out callback reaches the application" || bad "sign-out callback: $j"
+loc=$(cb -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Accept: text/html' https://sso.pspm.test/page)
+[[ $loc == "302 https://auth.pspm.test/oauth2/start?rd="* ]] && ok "other paths still require the sign-in" || bad "other paths: $loc"
+c=$(cb -o /dev/null -w '%{http_code}' -X POST -d x https://sso.pspm.test/signin-oidc/extra)
+[[ $c == 401 || $c == 302 ]] && ok "only the exact paths pass ($c)" || bad "/signin-oidc/extra: $c"
+# Let's Encrypt reaches the challenge of a site that requires sign-in (it got 401: no renewal)
+mkdir -p /var/www/acme/.well-known/acme-challenge && echo e2e > /var/www/acme/.well-known/acme-challenge/e2e-token
+c=$(curl -s -o /dev/null -w '%{http_code}' --resolve sso.pspm.test:80:127.0.0.1 http://sso.pspm.test/.well-known/acme-challenge/e2e-token)
+[[ $c == 200 ]] && ok "ACME challenge on a site that requires sign-in: 200" || bad "ACME challenge on the sign-in site: $c"
+rm -f /var/www/acme/.well-known/acme-challenge/e2e-token
+# request headers: both applications' cookies together. nginx answers the ACME path on port 80
+# itself (404), so only nginx's limits count: 32 KB per line, 8 x 32k in all (400 beyond)
+fill() { local h=() k; for k in $(seq 1 "$1"); do h+=(-H "X-Fill-$k: $(head -c 30000 /dev/zero | tr '\0' a)"); done; printf '%s\n' "${h[@]}"; }
+acme80() { curl -s -o /dev/null -w '%{http_code}' --resolve sso.pspm.test:80:127.0.0.1 "$@" http://sso.pspm.test/.well-known/acme-challenge/none; }
+mapfile -t h4 < <(fill 4); mapfile -t h9 < <(fill 9)
+c=$(acme80 -H "Cookie: big=$(head -c 30000 /dev/zero | tr '\0' b)" "${h4[@]}")
+[[ $c == 404 ]] && ok "request headers of 150 KB with a 30 KB Cookie line accepted: $c" || bad "150 KB request headers: $c"
+c=$(acme80 "${h9[@]}"); [[ $c == 400 ]] && ok "request headers of 270 KB refused: $c" || bad "270 KB request headers: $c"
+c=$(acme80 -H "Cookie: big=$(head -c 40000 /dev/zero | tr '\0' b)"); [[ $c == 400 ]] && ok "a 40 KB Cookie line refused: $c" || bad "40 KB Cookie line: $c"
+# HTTP/2 (curl sends at most 64 KB of headers): a 30 KB cookie reaches the sign-in check (401, not 400)
+c=$(cb --http2 -o /dev/null -w '%{http_code}' -H "Cookie: big=$(head -c 30000 /dev/zero | tr '\0' b)" -H "X-Fill-1: $(head -c 30000 /dev/zero | tr '\0' a)" https://sso.pspm.test/x)
+[[ $c == 401 ]] && ok "HTTP/2: 60 KB of request headers with a 30 KB cookie accepted: $c" || bad "HTTP/2 request headers: $c"
 kill "$bigpid" 2>/dev/null
 # entries longer than the kernel's ipset limit are capped, and the set is reloaded before the cap runs out
 tmo() { ipset list "$1" | awk -v ip="$2" '$1 == ip {print $3}'; }

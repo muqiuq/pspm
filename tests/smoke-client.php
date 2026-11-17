@@ -81,8 +81,15 @@ $form = ['_csrf' => csrf($b), 'hosts' => "app.example.ch\nwww.app.example.ch", '
 check($c === 200 && str_contains($b, 'Not an allowed path'), 'an invalid path is refused with a message');
 $form['routes'][1]['paths'] = '/api/';
 $form['routes'][1]['ov_conditions'] = ['public'];
+// an application's own sign-in callbacks: the sign-in overridden alone (without access conditions)
+$form['routes'][2] = ['id' => 'r3', 'match' => 'exact', 'paths' => '/signin-oidc /signout-callback-oidc', 'action' => 'proxy', 'listeners' => ['all'],
+    'status' => '404', 'redirect_code' => '302', 'ov_signin' => 'none'];
 [$c, , $loc] = req('POST', '/sites/edit', $form);
 check($c === 303, 'site saved');
+[, $b] = req('GET', '/sites');
+preg_match('#/sites/edit\?id=([0-9a-f-]{36})#', $b, $m);
+[, $b] = req('GET', '/sites/edit?id=' . ($m[1] ?? ''));
+check((bool)preg_match('#name="routes\[2\]\[ov_signin\]">.*?<option value="none" selected>#s', $b), 'a sign-in override without access conditions is kept');
 [$c, $b] = req('GET', '/changes');
 check($c === 200 && str_contains($b, 'Ready to apply'), 'changes offers Ready to apply');
 check(str_contains($b, 'sites/app.example.ch.conf'), 'the preview diff lists the new site file');
