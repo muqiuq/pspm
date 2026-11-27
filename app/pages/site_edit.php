@@ -121,7 +121,15 @@ function route_row(string $i, array $r, array $backendOpts, array $listenerOpts,
         . '<div class="form-text mt-0">For an application that runs at <code>/</code>: <code>/site1/page</code> reaches it as <code>/page</code>, <code>/site1</code> redirects to <code>/site1/</code>, '
         . 'its redirects and cookie paths go under <code>/site1/</code>, and it gets <code>X-Forwarded-Prefix: /site1</code>. Links in its pages stay as it writes them. Prefix routes that proxy only.</div>'
         . field_err($errors, "routes.$i.strip_prefix") . '</div>';
-    $o .= '<details class="mt-1"><summary class="small">Overrides for this route</summary><div class="row g-2 mt-1">';
+    // what the route overrides, in the summary; open when something is set (or wrong)
+    $set = [];
+    if (!empty($ov['access']['conditions'])) $set[] = 'access ' . implode(' or ', array_map(fn($c) => explode(' (', $conds[$c] ?? $c)[0], $ov['access']['conditions']));
+    if (isset($ov['access']['signin'])) $set[] = 'sign-in ' . $ov['access']['signin'];
+    if (($ov['max_body'] ?? '') !== '') $set[] = 'max body ' . $ov['max_body'];
+    if (($ov['read_timeout'] ?? '') !== '') $set[] = 'read timeout ' . $ov['read_timeout'] . ' s';
+    if (!empty($ov['backend'])) $set[] = 'backend ' . ($backendOpts[$ov['backend']] ?? '?');
+    $bad = array_filter(array_keys($errors), fn($k) => preg_match('/^routes\.' . preg_quote($i, '/') . '\.(access|signin|max_body|backend)/', (string)$k));
+    $o .= '<details class="mt-1"' . ($set || $bad ? ' open' : '') . '><summary class="small">Overrides for this route' . ($set ? ': ' . h(implode(', ', $set)) : '') . '</summary><div class="row g-2 mt-1">';
     $o .= '<div class="col-md-5"><label class="form-label small d-block">Access (empty: the site\'s)</label>';
     foreach ($conds as $k => $v) {
         $o .= '<div class="form-check form-check-inline"><input class="form-check-input" type="checkbox" name="routes[' . $i . '][ov_conditions][]" value="' . h($k) . '"'
@@ -129,7 +137,10 @@ function route_row(string $i, array $r, array $backendOpts, array $listenerOpts,
     }
     $o .= field_err($errors, "routes.$i.access.conditions") . '</div>';
     $o .= '<div class="col-md-12"><label class="form-label small">Sign-in for this route</label>' . $sel('ov_signin', ['' => 'site\'s', 'none' => 'none', 'alternative' => 'alternative', 'required' => 'required'], $ov['access']['signin'] ?? '')
-        . '<div class="form-text">An application with its own Microsoft sign-in behind this one (callbacks such as <code>/signin-oidc</code> <code>/signout-callback-oidc</code>): match <em>exact</em>, access <em>Public</em>, sign-in <em>none</em>. See <a href="/help/signin">Help</a>.</div></div>';
+        . field_err($errors, "routes.$i.signin")
+        . '<div class="form-text">A public path on a protected site: access <em>Public</em>, sign-in <em>none</em> (with the site\'s sign-in <em>required</em>, Public alone still asks for it). '
+        . 'A protected path on a public site: its access, or sign-in <em>required</em> at the site\'s provider (the site\'s own sign-in can stay <em>none</em>). '
+        . 'An application with its own Microsoft sign-in behind this one (callbacks such as <code>/signin-oidc</code> <code>/signout-callback-oidc</code>): match <em>exact</em>, access <em>Public</em>, sign-in <em>none</em>. See <a href="/help/signin">Help</a>.</div></div>';
     $o .= '<div class="col-md-2"><label class="form-label small">Max body</label><input class="form-control form-control-sm" name="routes[' . $i . '][ov_max_body]" value="' . h($ov['max_body'] ?? '') . '" placeholder="site"></div>';
     $o .= '<div class="col-md-2"><label class="form-label small">Read timeout (s)</label><input class="form-control form-control-sm" name="routes[' . $i . '][ov_read_timeout]" value="' . h($ov['read_timeout'] ?? '') . '" placeholder="site"></div>';
     $o .= '<div class="col-md-3"><label class="form-label small">Backend</label>' . $sel('ov_backend', ['' => 'site\'s'] + array_slice($backendOpts, 1, null, true), $ov['backend'] ?? '') . field_err($errors, "routes.$i.backend") . '</div>';
@@ -160,7 +171,8 @@ page_start($site ? 'Site ' . $site['hosts'][0] : 'New site', '/sites');
       </select></div>
     <div class="mb-2"><span class="form-label d-block">Let a request in when any of these is true</span>
       <?php foreach ($conds as $k => $v): ?><?= f_check('conditions[]', $v, in_array($k, $form['access']['conditions'], true), '', $k) ?><?php endforeach; ?>
-      <?= field_err($errors, 'access.conditions') ?></div>
+      <?= field_err($errors, 'access.conditions') ?>
+      <div class="form-text">For the whole site. A path (route) can have its own access and sign-in: <em>Overrides for this route</em> under Routes.</div></div>
     <div class="row"><div class="col-md-6"><?= f_select('denied', 'When denied', $form['access']['denied'], ['403' => '403 Forbidden', '404' => '404 (reveal nothing)', 'redirect' => '302 to a URL', 'close' => 'close the connection']) ?></div>
       <div class="col-md-6"><?= f_text('denied_url', 'Redirect URL when denied', $form['access']['denied_url'], $errors, '', 'text', 'access.denied_url') ?></div></div>
     <?= f_select('client_certs', 'Client certificates', $form['client_certs'], ['optional' => 'request (optional)', 'off' => 'do not request'], $errors) ?>

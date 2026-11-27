@@ -86,8 +86,12 @@ $form['routes'][2] = ['id' => 'r3', 'match' => 'exact', 'paths' => '/signin-oidc
     'status' => '404', 'redirect_code' => '302', 'ov_signin' => 'none'];
 // an application that runs at / under /site1/: the path without the prefix, only for a prefix route that proxies
 $form['routes'][3] = ['id' => 'r4', 'match' => 'exact', 'paths' => '/site1', 'action' => 'proxy', 'listeners' => ['all'], 'status' => '404', 'redirect_code' => '302', 'strip_prefix' => '1'];
+$form['routes'][2]['ov_signin'] = 'required';   // the site has no provider
 [$c, $b] = req('POST', '/sites/edit', $form);
 check($c === 200 && str_contains($b, 'Only a prefix route that proxies to a backend can pass the path without its prefix.'), 'without the prefix: refused for an exact route');
+check(str_contains($b, 'This route signs in: choose the provider') && str_contains($b, '<details class="mt-1" open><summary class="small">Overrides for this route: sign-in required</summary>'),
+    'a route that signs in on a site without a provider: refused at the route, its overrides open');
+$form['routes'][2]['ov_signin'] = 'none';
 $form['routes'][3]['match'] = 'prefix';
 [$c, , $loc] = req('POST', '/sites/edit', $form);
 check($c === 303, 'site saved');
@@ -97,6 +101,8 @@ preg_match('#/sites/edit\?id=([0-9a-f-]{36})#', $b, $m);
 check((bool)preg_match('#name="routes\[2\]\[ov_signin\]">.*?<option value="none" selected>#s', $b), 'a sign-in override without access conditions is kept');
 check(str_contains($b, 'name="routes[3][paths]" value="/site1/"') && str_contains($b, 'name="routes[3][strip_prefix]" value="1" checked>')
     && substr_count($b, '[strip_prefix]" value="1" checked>') === 1, 'without the prefix: kept on its route only, the path with its trailing /');
+check(str_contains($b, '<details class="mt-1" open><summary class="small">Overrides for this route: access Public</summary>')
+    && str_contains($b, '<details class="mt-1"><summary class="small">Overrides for this route</summary>'), 'route overrides: what is set shows in the summary (open), none: closed');
 [$c, $b] = req('GET', '/changes');
 check($c === 200 && str_contains($b, 'Ready to apply'), 'changes offers Ready to apply');
 check(str_contains($b, 'sites/app.example.ch.conf'), 'the preview diff lists the new site file');

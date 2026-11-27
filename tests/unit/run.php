@@ -369,7 +369,9 @@ ok(str_contains($body, "proxy_redirect /site1 /site1;\n        proxy_redirect / 
     'redirects: already under the prefix stay (first), the others go under it, relative and to this host name');
 ok(str_contains($body, "proxy_cookie_path /site1 /site1;\n        proxy_cookie_path / /site1/;"), 'cookie paths go under the prefix (two applications do not share cookies)');
 ok(str_contains($body, 'proxy_set_header X-Forwarded-Email $pspm_email;') && str_contains($body, 'proxy_set_header Host $host;'), 'identity and Host headers as on every route');
-ok(str_contains($sc, "    location = /site1 {\n        return 301 /site1/\$is_args\$args;\n    }\n") && str_contains($sc, "    location = /site2 {\n"), '/site1 and /site2 redirect to their trailing /');
+$redir = fn(string $cut) => "        content_by_lua_block {\n            local a = ngx.var.args\n            return ngx.redirect(\"$cut\" .. (a and \"?\" .. a or \"\"), 301)\n        }\n    }\n";
+ok(str_contains($sc, "    location = /site1 {\n" . $redir('/site1/')) && str_contains($sc, "    location = /site2 {\n" . $redir('/site2/')),
+    '/site1 and /site2 redirect to their trailing / (after block.lua and the gate: not with "return")');
 foreach (array_slice(explode("\nserver {\n", "\n$sc"), 1) as $srv) ok(substr_count($srv, 'location = /site1 {') <= 1, 'one redirect /site1 per server');
 preg_match_all('#\n    location / \{\n(.*?)\n    \}#s', $sc, $mm);
 $plain = array_values(array_filter($mm[1], fn($x) => str_contains($x, 'proxy_pass')));
@@ -378,7 +380,20 @@ ok($plain && !array_filter($plain, fn($x) => str_contains($x, 'X-Forwarded-Prefi
 $sx = $sd; $sx['sites'][0]['routes'][] = ['id' => 'rx', 'match' => 'exact', 'paths' => ['/site1'], 'listeners' => ['all'], 'action' => 'status', 'status' => 204,
     'redirect_url' => '', 'redirect_code' => 302, 'overrides' => []];
 $sxc = (new Renderer(['id' => 9, 'document' => $sx], $facts))->render()['files']['sites/app.example.ch.conf'];
-ok((bool)preg_match('#location = /site1 \{\n        return 204;#', $sxc) && !str_contains($sxc, 'return 301 /site1/'), 'a route of its own for /site1: no automatic redirect (no duplicate location)');
+ok((bool)preg_match('#location = /site1 \{\n        return 204;#', $sxc) && !str_contains($sxc, 'ngx.redirect("/site1/"'), 'a route of its own for /site1: no automatic redirect (no duplicate location)');
+// a public path on a protected site (and the other way round): the redirect /site1 → /site1/ has the route's access
+$sa = $doc; $sa['sites'][0]['routes'][] = array_replace($strip, ['paths' => ['/site1/'], 'overrides' => ['access' => ['conditions' => ['public'], 'signin' => 'none']]]);
+$sa['sites'][0]['routes'][] = array_replace($strip, ['id' => 'rs2', 'paths' => ['/site2/'], 'overrides' => ['access' => ['conditions' => ['lan']]]]);
+$sac = (new Renderer(['id' => 11, 'document' => $sa], $facts))->render()['files']['sites/app.example.ch.conf'];
+ok(str_contains($sac, "    location = /site1 {\n        set \$pspm_allow public;\n        set \$pspm_signin none;\n" . $redir('/site1/')),
+    'a public route on a protected site: its redirect is public too (no sign-in before it)');
+ok((bool)preg_match('#\n    location \^~ /site1/ \{\n        set \$pspm_allow public;\n        set \$pspm_signin none;\n#', $sac), 'and the route itself');
+ok(str_contains($sac, "    location = /site2 {\n        set \$pspm_allow lan;\n" . $redir('/site2/')), 'a protected route: its redirect is protected the same way');
+$sg = $doc['sites'][0]; $sg['access']['signin']['provider'] = ''; $sg['access']['signin']['mode'] = 'none';
+$sg['routes'][] = array_replace($strip, ['paths' => ['/site1/'], 'overrides' => ['access' => ['signin' => 'required']]]);
+ok(isset(Validate::site($sg, $bids)[1]['routes.' . (count($sg['routes']) - 1) . '.signin']), 'a route that signs in, on a site without a provider: refused at the route');
+$sg['access']['signin']['provider'] = $doc['sites'][0]['access']['signin']['provider'];
+eq(array_filter(Validate::site($sg, $bids)[1], fn($k) => str_ends_with($k, '.signin'), ARRAY_FILTER_USE_KEY), [], 'with the provider chosen (the site\'s own sign-in none): valid');
 $old = $doc; $old['sites'][0]['routes'][] = array_diff_key(array_replace($strip, ['paths' => ['/site1/']]), ['strip_prefix' => 1]);
 $oc = (new Renderer(['id' => 10, 'document' => $old], $facts))->render()['files']['sites/app.example.ch.conf'];
 ok(!str_contains($oc, 'X-Forwarded-Prefix') && !str_contains($oc, 'location = /site1 '), 'a route without the value (older revisions) renders as before');

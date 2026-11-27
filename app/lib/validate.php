@@ -379,6 +379,10 @@ final class Validate
                 // the sign-in alone (e.g. "none" for an application's own sign-in callback); the site's conditions stay
                 $route['overrides']['access'] = ['signin' => self::enum($o['access']['signin'], ['none', 'alternative', 'required']) ?? 'none'];
             }
+            // the route signs in at the site's provider (also when the site itself does not sign in)
+            if (($route['overrides']['access']['signin'] ?? 'none') !== 'none' && $s['access']['signin']['provider'] === '') {
+                $e["routes.$i.signin"] = 'This route signs in: choose the provider under "Sign-in with Microsoft" (the site\'s own sign-in can stay none).';
+            }
             if (isset($o['max_body']) && trim((string)$o['max_body']) !== '') {
                 $route['overrides']['max_body'] = self::size((string)$o['max_body']) ?? '';
                 if ($route['overrides']['max_body'] === '') $e["routes.$i.max_body"] = 'e.g. 10m or 0.';

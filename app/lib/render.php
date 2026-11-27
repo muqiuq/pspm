@@ -382,7 +382,11 @@ final class Renderer
                 $cut = $strip && $path !== '/' && str_ends_with($path, '/') ? $path : null;
                 $o .= "    location $loc {\n" . $this->routeBody($s, $g, $r, $listener, $cut) . "    }\n";
                 if ($cut !== null && !isset($taken[$base = rtrim($cut, '/')])) {
-                    $o .= "    location = $base {\n        return 301 $cut\$is_args\$args;\n    }\n";
+                    // With the access of the route, and answered in the content phase: "return" would answer in
+                    // the rewrite phase, before block.lua and the gate (a protected /site3 would redirect anyone).
+                    $o .= "    location = $base {\n" . $this->routeAccess($s, $r, '        ')
+                        . "        content_by_lua_block {\n            local a = ngx.var.args\n            return ngx.redirect(" . $this->luaStr($cut)
+                        . " .. (a and \"?\" .. a or \"\"), 301)\n        }\n    }\n";
                     $taken[$base] = true;
                 }
             }
@@ -390,21 +394,26 @@ final class Renderer
         return $o;
     }
 
+    /** The access of a route that overrides the site's: the "set" lines for its location (empty: the site's). */
+    private function routeAccess(array $s, array $r, string $i): string
+    {
+        // Let's Encrypt must always reach the challenge: public, and never sent to the sign-in
+        // (a site that requires sign-in would answer 401, and its certificate could not be renewed)
+        if ($r['action'] === 'acme_proxy') return "{$i}set \$pspm_allow public;\n{$i}set \$pspm_signin none;\n";
+        $a = $r['overrides']['access'] ?? [];
+        $o = '';
+        // without own conditions the site's stay ($pspm_allow from the server); the sign-in can be overridden alone
+        if (!empty($a['conditions'])) $o .= "{$i}set \$pspm_allow " . implode(',', $a['conditions']) . ";\n";
+        if (isset($a['signin'])) $o .= "{$i}set \$pspm_signin " . ($this->signinProvider($s) ? $a['signin'] : 'none') . ";\n";
+        return $o;
+    }
+
     /** The body of a route's location; $cut is the prefix the backend gets the path without (e.g. /site1/), or null. */
     private function routeBody(array $s, array $g, array $r, string $listener, ?string $cut = null): string
     {
         $i = '        ';
-        $o = '';
         $ov = $r['overrides'];
-        // Let's Encrypt must always reach the challenge: public, and never sent to the sign-in
-        // (a site that requires sign-in would answer 401, and its certificate could not be renewed)
-        if ($r['action'] === 'acme_proxy') $o .= "{$i}set \$pspm_allow public;\n{$i}set \$pspm_signin none;\n";
-        elseif (!empty($ov['access'])) {
-            // without own conditions the site's stay ($pspm_allow from the server); the sign-in can be overridden alone
-            if (!empty($ov['access']['conditions'])) $o .= "{$i}set \$pspm_allow " . implode(',', $ov['access']['conditions']) . ";\n";
-            if (isset($ov['access']['signin']) && $this->signinProvider($s)) $o .= "{$i}set \$pspm_signin {$ov['access']['signin']};\n";
-            elseif (isset($ov['access']['signin'])) $o .= "{$i}set \$pspm_signin none;\n";
-        }
+        $o = $this->routeAccess($s, $r, $i);
         if ($r['action'] === 'status') return $o . "{$i}return {$r['status']};\n";
         if ($r['action'] === 'redirect') return $o . "{$i}return {$r['redirect_code']} \"{$r['redirect_url']}\";\n";
 

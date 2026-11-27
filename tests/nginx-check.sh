@@ -30,7 +30,8 @@ php /src/tests/render-fixture.php "$own" own >/dev/null
 cp -r /src/nginx/static "$own/static"; cp -r /src/lua "$own/lua"
 ngt "$own"
 grep -A3 'location = /signin-oidc' "$own/sites/app.example.ch.conf"
-# without the prefix (plan §7.3): nginx -t, then a running nginx in front of an application at /
+# without the prefix (plan §7.3): nginx -t, then a running nginx in front of an application at /;
+# the site is LAN only (127.0.0.1 is not), some of its routes are public
 strip=/tmp/release-strip
 rm -rf "$strip"; mkdir -p "$strip"
 php /src/tests/render-fixture.php "$strip" strip >/dev/null
@@ -50,8 +51,14 @@ jq -e '.uri == "/page?x=1" and .prefix == "/site1" and .host == "printer.example
 j=$(get '/site2/'); jq -e '.uri == "/" and .prefix == "/site2"' <<<"$j" >/dev/null && ok "/site2/ reaches it as /" || bad "/site2/: $j"
 j=$(get '/site1/a%20b'); jq -e '.uri == "/a%20b"' <<<"$j" >/dev/null && ok "an encoded path stays encoded" || bad "/site1/a%20b: $j"
 j=$(pr -H 'X-Forwarded-Prefix: /evil' 'http://printer.example.ch/site1/'); jq -e '.prefix == "/site1"' <<<"$j" >/dev/null && ok "a client cannot send its own X-Forwarded-Prefix there" || bad "client prefix: $j"
-l=$(hdr '/site1?q=2' location); [[ $l == "http://printer.example.ch/site1/?q=2" ]] && ok "/site1 redirects to /site1/ (query kept)" || bad "/site1: $l"
-j=$(get '/site1abc'); jq -e '.uri == "/site1abc" and .prefix == ""' <<<"$j" >/dev/null && ok "/site1abc is not taken: the site's route, path unchanged" || bad "/site1abc: $j"
+# the redirect comes from Lua after the gate: Location stays relative (absolute_redirect is for nginx's own)
+l=$(hdr '/site1?q=2' location); [[ $l == "/site1/?q=2" ]] && ok "/site1 redirects to /site1/ (query kept)" || bad "/site1: $l"
+l=$(hdr '/site2' location); [[ $l == "/site2/" ]] && ok "/site2 redirects too: public like its route, on a site that is not" || bad "/site2: $l"
+st() { pr -o /dev/null -w '%{http_code}' "http://printer.example.ch$1"; }
+c=$(st /site1abc); [[ $c == 403 ]] && ok "/site1abc is not taken: the site's route, with the site's access (403)" || bad "/site1abc: $c"
+c=$(st /site3/x); [[ $c == 403 ]] && ok "/site3/ without an access of its own: the site's (403)" || bad "/site3/x: $c"
+c=$(st /site3); [[ $c == 403 ]] && ok "and its redirect /site3 → /site3/ as well (403, nothing revealed)" || bad "/site3: $c"
+c=$(st /); [[ $c == 403 ]] && ok "/ (the site's route): 403" || bad "/: $c"
 j=$(get '/other/x'); jq -e '.uri == "/other/x" and .prefix == ""' <<<"$j" >/dev/null && ok "other paths: unchanged, no X-Forwarded-Prefix" || bad "/other/x: $j"
 # nginx makes a relative Location absolute (absolute_redirect, on every route)
 l=$(hdr /site1/go location); [[ $l == http://printer.example.ch/site1/login ]] && ok "a relative redirect goes under the prefix" || bad "redirect /login: $l"
