@@ -354,7 +354,7 @@ Example (shortened):
 {
   "worst": "amber",
   "problems": ["Changes: Revision 42 is ready. On the server run sudo /opt/pspm/install.sh"],
-  "version": "0.2.3", "commit": "38a8820", "updates_behind": 0,
+  "version": "0.2.3", "commit": "abc1234", "updates_behind": 0,
   "tiles": [
     {"tile": "Proxy", "level": "green", "link": "/changes",
      "facts": {"nginx": "running", "live_revision": 41, "last_apply": "applied", "drift": []},
