@@ -3,6 +3,7 @@
 # PHP and PostgreSQL run in containers; Chromium (Playwright) shares the PHP container's network,
 # so the UI is http://localhost:8080 and the Secure session cookie works.
 #   tests/screenshots.sh [out dir, default .tmp/screens] [page …]
+#   FULL_PAGE=0 tests/screenshots.sh …   the first 1440×900 only (e.g. a long form for the README)
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 out=${1:-.tmp/screens}; shift || true
@@ -24,12 +25,13 @@ for mode in light dark; do
         "$token" "$mode" >"$out/state-$mode.json"
 done
 list=$(printf '%s\n' "${pages[@]}")
-docker run --rm --network container:pspm-shots-ui -v "$PWD/$out:/out" -e LIST="$list" mcr.microsoft.com/playwright:v1.57.0-noble bash -c '
+docker run --rm --network container:pspm-shots-ui -v "$PWD/$out:/out" -e LIST="$list" -e FULL_PAGE="${FULL_PAGE:-1}" mcr.microsoft.com/playwright:v1.57.0-noble bash -c '
     cd /tmp && npm i -s playwright@1.57.0 >/dev/null 2>&1
+    full=--full-page; [[ $FULL_PAGE == 0 ]] && full=
     while read -r p; do
         n=$(echo "$p" | tr -c "a-z0-9\n" "_" | sed "s/^_*$/dashboard/;s/^_//")
         for mode in light dark; do
-            npx playwright screenshot -b chromium --viewport-size=1440,900 --full-page --load-storage="/out/state-$mode.json" \
+            npx playwright screenshot -b chromium --viewport-size=1440,900 $full --load-storage="/out/state-$mode.json" \
                 "http://localhost:8080$p" "/out/$n-$mode.png" >/dev/null 2>&1 && echo "$n-$mode.png" || echo "FAILED $p ($mode)"
         done
     done <<<"$LIST"'
